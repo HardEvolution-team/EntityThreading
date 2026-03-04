@@ -1,0 +1,12 @@
+// Add any additional repositories for your dependencies here
+
+repositories {
+    maven {
+        name = "Forge"
+        url = "https://maven.minecraftforge.net/"
+    }
+    maven {
+        name = "Mojang"
+        url = "https://libraries.minecraft.net/"
+    }
+}

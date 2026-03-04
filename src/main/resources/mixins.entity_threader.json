@@ -1,0 +1,13 @@
+{
+  "package": "demonscythe.entitythreading.transform.mixin",
+  "refmap": "mixins.entity_threader.refmap.json",
+  "target": "@env(DEFAULT)",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "mixins": [
+    "MixinWorldServer",
+    "MixinWorld"
+  ],
+  "client": [],
+  "server": []
+}
