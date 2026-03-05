@@ -63,6 +63,27 @@ public abstract class MixinWorldServer {
         }
     }
 
+    // === Entity state updates (packets) ===
+    @Inject(method = "setEntityState", at = @At("HEAD"), cancellable = true)
+    private void onSetEntityState(Entity entityIn, byte state, CallbackInfo ci) {
+        if (EntityTickScheduler.isEntityThread()) {
+            WorldServer world = (WorldServer) (Object) this;
+            DeferredActionQueue.enqueue(() -> world.setEntityState(entityIn, state));
+            ci.cancel();
+        }
+    }
+
+    // === Block events (Pistons, Note blocks, etc.) ===
+    @Inject(method = "addBlockEvent", at = @At("HEAD"), cancellable = true)
+    private void onAddBlockEvent(BlockPos pos, Block blockIn, int eventID, int eventParam, CallbackInfo ci) {
+        if (EntityTickScheduler.isEntityThread()) {
+            WorldServer world = (WorldServer) (Object) this;
+            BlockPos immutable = pos.toImmutable();
+            DeferredActionQueue.enqueue(() -> world.addBlockEvent(immutable, blockIn, eventID, eventParam));
+            ci.cancel();
+        }
+    }
+
     // === Entity tracking updates ===
     @Inject(method = "updateEntityWithOptionalForce", at = @At("HEAD"), cancellable = true)
     private void onUpdateEntityWithOptionalForce(Entity entityIn, boolean forceUpdate, CallbackInfo ci) {

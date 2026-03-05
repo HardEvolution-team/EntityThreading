@@ -1,11 +1,9 @@
 
-
 package ded.entitythreading.schedule;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
-
 
 public final class DeferredActionQueue {
 
@@ -25,22 +23,35 @@ public final class DeferredActionQueue {
      */
     public static int replayAll() {
         int count = 0;
-        // Drain into a local list first to avoid infinite loops if actions enqueue more actions
-        List<Runnable> batch = new ArrayList<>();
         Runnable action;
         while ((action = GLOBAL_QUEUE.poll()) != null) {
-            batch.add(action);
-        }
-        for (Runnable r : batch) {
             try {
-                r.run();
+                action.run();
+                count++;
             } catch (Exception e) {
                 System.err.println("[EntityThreading] Error replaying deferred action: " + e.getMessage());
                 e.printStackTrace();
             }
-            count++;
         }
         return count;
+    }
+
+    /**
+     * Replay a single action if available.
+     * Returns true if an action was replayed.
+     */
+    public static boolean replayOne() {
+        Runnable action = GLOBAL_QUEUE.poll();
+        if (action != null) {
+            try {
+                action.run();
+                return true;
+            } catch (Exception e) {
+                System.err.println("[EntityThreading] Error replaying deferred action: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+        return false;
     }
 
     /**

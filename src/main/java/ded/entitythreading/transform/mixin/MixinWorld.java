@@ -30,6 +30,9 @@ public abstract class MixinWorld implements IMixinWorld {
     public abstract Chunk getChunk(int chunkX, int chunkZ);
 
     @Shadow
+    public abstract void updateEntity(Entity ent);
+
+    @Shadow
     public abstract boolean isChunkLoaded(int x, int z, boolean allowEmpty);
 
     /**
@@ -56,6 +59,11 @@ public abstract class MixinWorld implements IMixinWorld {
                 this.getChunk(i, k).addEntity(entity);
             }
         }
+    }
+
+    @Override
+    public void entitythreading$tickEntityDirectly(Entity entity) {
+        this.updateEntity(entity);
     }
 
     // === Block State Changes (Endermen, FallingBlock, Creeper explosions) ===
@@ -143,6 +151,76 @@ public abstract class MixinWorld implements IMixinWorld {
     }
 
     // === LOW-LEVEL ENTITY LIST MODIFICATIONS (Prevents CME in getEntities) ===
+    // === Neighbor Updates (Redstone, block updates) ===
+    @Inject(method = "notifyNeighborsOfStateChange", at = @At("HEAD"), cancellable = true)
+    private void onNotifyNeighborsOfStateChange(BlockPos pos, Block blockType, boolean updateObservers,
+            CallbackInfo ci) {
+        if (EntityTickScheduler.isEntityThread()) {
+            World world = (World) (Object) this;
+            BlockPos immutable = pos.toImmutable();
+            DeferredActionQueue
+                    .enqueue(() -> world.notifyNeighborsOfStateChange(immutable, blockType, updateObservers));
+            ci.cancel();
+        }
+    }
+
+    // === Lighting Updates (Relatively expensive, often causes CME/deadlocks in
+    // light engine) ===
+    @Inject(method = "checkLight", at = @At("HEAD"), cancellable = true)
+    private void onCheckLight(BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
+        if (EntityTickScheduler.isEntityThread()) {
+            World world = (World) (Object) this;
+            BlockPos immutable = pos.toImmutable();
+            DeferredActionQueue.enqueue(() -> world.checkLight(immutable));
+            cir.setReturnValue(true);
+        }
+    }
+
+    @Inject(method = "checkLightFor", at = @At("HEAD"), cancellable = true)
+    private void onCheckLightFor(net.minecraft.world.EnumSkyBlock lightType, BlockPos pos,
+            CallbackInfoReturnable<Boolean> cir) {
+        if (EntityTickScheduler.isEntityThread()) {
+            World world = (World) (Object) this;
+            BlockPos immutable = pos.toImmutable();
+            DeferredActionQueue.enqueue(() -> world.checkLightFor(lightType, immutable));
+            cir.setReturnValue(true);
+        }
+    }
+
+    // === Tile Entity Changes ===
+    @Inject(method = "setTileEntity", at = @At("HEAD"), cancellable = true)
+    private void onSetTileEntity(BlockPos pos, net.minecraft.tileentity.TileEntity tileEntityIn, CallbackInfo ci) {
+        if (EntityTickScheduler.isEntityThread()) {
+            World world = (World) (Object) this;
+            BlockPos immutable = pos.toImmutable();
+            DeferredActionQueue.enqueue(() -> world.setTileEntity(immutable, tileEntityIn));
+            ci.cancel();
+        }
+    }
+
+    @Inject(method = "removeTileEntity", at = @At("HEAD"), cancellable = true)
+    private void onRemoveTileEntity(BlockPos pos, CallbackInfo ci) {
+        if (EntityTickScheduler.isEntityThread()) {
+            World world = (World) (Object) this;
+            BlockPos immutable = pos.toImmutable();
+            DeferredActionQueue.enqueue(() -> world.removeTileEntity(immutable));
+            ci.cancel();
+        }
+    }
+
+    /**
+     * Prevent synchronous chunk loading from worker threads.
+     * If a worker thread requests an unloaded chunk, return an EmptyChunk.
+     */
+    @Inject(method = "getChunk(II)Lnet/minecraft/world/chunk/Chunk;", at = @At("HEAD"), cancellable = true)
+    private void onGetChunk(int x, int z, CallbackInfoReturnable<Chunk> cir) {
+        if (EntityTickScheduler.isEntityThread()) {
+            if (!this.isChunkLoaded(x, z, true)) {
+                cir.setReturnValue(new net.minecraft.world.chunk.EmptyChunk((World) (Object) this, x, z));
+            }
+        }
+    }
+
     @Inject(method = "onEntityAdded", at = @At("HEAD"), cancellable = true)
     private void onOnEntityAdded(Entity entityIn, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {

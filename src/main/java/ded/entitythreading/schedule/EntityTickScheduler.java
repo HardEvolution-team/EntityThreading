@@ -96,8 +96,14 @@ public class EntityTickScheduler {
      * Collects entities for batch processing.
      */
     public static void queueEntity(World world, Entity entity) {
-        if (!EntityThreadingConfig.enabled) {
-            world.updateEntity(entity);
+        if (!EntityThreadingConfig.enabled || !isEntityThread()) {
+            // Not a worker thread (likely main thread) - tick directly but avoid recursion
+            // We use the patched method but our Mixin logic will ensure it's not queued
+            // again
+            // if we are on the main thread.
+            // Wait, if we call world.updateEntity(entity) here, it's redirected again.
+            // We need a way to call the ORIGINAL updateEntity.
+            ((IMixinWorld) world).entitythreading$tickEntityDirectly(entity);
             return;
         }
 
@@ -211,13 +217,18 @@ public class EntityTickScheduler {
             });
         }
 
-        try {
-            if (!latch.await(30, TimeUnit.SECONDS)) {
-                System.err
-                        .println("[EntityThreading] WARNING: Tick timed out after 30s! " + totalEntities + " entities");
+        // Deadlock-resistant wait: process deferred actions while waiting for workers
+        while (latch.getCount() > 0) {
+            if (!DeferredActionQueue.replayOne()) {
+                // If no deferred actions, do a tiny sleep to prevent 100% CPU usage on main
+                // thread
+                try {
+                    Thread.sleep(1);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         }
 
         lastEntityCount = totalEntities;
@@ -269,7 +280,7 @@ public class EntityTickScheduler {
             // EntityTracker.tick()
             // after World.updateEntities(). No manual call needed here.
         } catch (Throwable t) {
-            autoBlacklist(entity.getClass().getName(), entity.getClass().getSimpleName(), t.getMessage());
+            autoBlacklist(entity.getClass().getName(), entity.getClass().getSimpleName(), t.getMessage(), t);
         }
     }
 
@@ -277,11 +288,14 @@ public class EntityTickScheduler {
      * Called by EntityGroup to auto-blacklist a failing entity class.
      * Public so it can be called from EntityGroup.runTick().
      */
-    public static void autoBlacklist(String className, String simpleName, String errorMsg) {
+    public static void autoBlacklist(String className, String simpleName, String errorMsg, Throwable t) {
         runtimeBlacklisted.add(className);
         if (loggedErrorClasses.add(className)) {
             System.err.println("[EntityThreading] Auto-blacklisted " + simpleName +
                     " (thread-unsafe, will tick on main thread): " + errorMsg);
+            if (t != null) {
+                t.printStackTrace();
+            }
         }
     }
 
@@ -330,12 +344,16 @@ public class EntityTickScheduler {
             });
         }
 
-        try {
-            if (!latch.await(15, TimeUnit.SECONDS)) {
-                System.err.println("[EntityThreading] WARNING: Region tick timed out after 15s!");
+        // Deadlock-resistant wait: process deferred actions while waiting for workers
+        while (latch.getCount() > 0) {
+            if (!DeferredActionQueue.replayOne()) {
+                try {
+                    Thread.sleep(1);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         }
 
         lastEntityCount = totalEntities;
