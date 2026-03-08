@@ -5,8 +5,15 @@
   "minVersion": "0.8",
   "compatibilityLevel": "JAVA_8",
   "mixins": [
+    "MixinWorld",
+    "MixinChunk",
+    "MixinClassInheritanceMultiMap",
     "MixinWorldServer",
-    "MixinWorld"
+    "MixinPathNavigate",
+    "MixinVillage",
+    "MixinVillageCollection",
+    "MixinAlfheimLightingEngine",
+    "accessor.PathFinderAccessor"
   ],
   "client": [],
   "server": []

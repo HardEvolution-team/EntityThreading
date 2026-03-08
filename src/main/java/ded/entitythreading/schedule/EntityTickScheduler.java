@@ -4,51 +4,67 @@ import ded.entitythreading.EntityThreadingConfig;
 import ded.entitythreading.transform.IMixinWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.World;
+import net.minecraft.world.chunk.Chunk;
+import net.minecraft.world.gen.ChunkProviderServer;
 
 import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * High-performance entity tick scheduler.
+ * Parallel entity tick scheduler.
  *
- * Two distribution modes:
- * 1. BALANCED: Collects all entities into a flat list, splits evenly across N
- * threads.
- * Best for 10k+ entities — guarantees all cores are fully utilized.
- * 2. REGION: Groups entities by chunk region for spatial locality.
- * Better for moderate entity counts with clustered entities.
- *
- * Both modes defer unsafe world mutations to DeferredActionQueue.
+ * Key design decisions:
+ * 1. Worker threads call entity.onUpdate() directly — NOT world.updateEntity()
+ * 2. Chunk snapshot is built before parallel ticking — workers NEVER touch ChunkProvider
+ * 3. Chunk position updates are deferred to main thread
+ * 4. Main thread participates as a worker (no idle CPU)
+ * 5. latch.await() has a timeout — prevents permanent server freeze if a worker hangs
  */
 public class EntityTickScheduler {
 
-    // Thread pool
-    private static ForkJoinPool threadPool;
+    private static volatile ExecutorService threadPool;
     private static int currentThreadCount = 0;
 
-    // Blacklisted entity class names (O(1) lookup) - includes config + runtime
-    // auto-blacklisted
+    // Blacklisted entity class names
     private static final Set<String> blacklistedClasses = ConcurrentHashMap.newKeySet();
-    // Runtime auto-blacklisted (entities that crashed on worker threads)
-    private static final Set<String> runtimeBlacklisted = ConcurrentHashMap.newKeySet();
-    // Log dedup: only log once per entity class to prevent spam
     private static final Set<String> loggedErrorClasses = ConcurrentHashMap.newKeySet();
 
-    // === BALANCED MODE: flat entity batching ===
-    private static final List<EntityTickEntry> allEntities = Collections.synchronizedList(new ArrayList<>(4096));
-    private static final List<EntityTickEntry> mainThreadEntities = Collections.synchronizedList(new ArrayList<>(128));
+    // Entity collection buffers — ThreadLocal for client/server isolation
+    private static final ThreadLocal<List<EntityTickEntry>> parallelEntities =
+            ThreadLocal.withInitial(() -> new ArrayList<>(4096));
+    private static final ThreadLocal<List<EntityTickEntry>> mainThreadEntities =
+            ThreadLocal.withInitial(() -> new ArrayList<>(256));
 
-    // === REGION MODE: chunk-based grouping ===
-    private static final ConcurrentHashMap<ChunkGroupKey, EntityGroup> groups = new ConcurrentHashMap<>(256);
+    // ThreadLocal flag: true if current thread is one of our worker threads
+    private static final ThreadLocal<Boolean> IS_WORKER_THREAD = ThreadLocal.withInitial(() -> false);
 
-    // Stats
-    private static volatile int lastEntityCount = 0;
-    private static volatile int lastThreadsUsed = 0;
-    private static volatile int lastDeferredCount = 0;
+    // Track current side for deferred action queue routing
+    private static final ThreadLocal<Boolean> currentSideIsRemote = ThreadLocal.withInitial(() -> false);
+
+    /**
+     * Snapshot of loaded chunks, built on main thread before parallel ticking.
+     * Worker threads read from this instead of ChunkProvider (which is NOT thread-safe).
+     */
+    private static volatile Map<Long, Chunk> chunkSnapshot = Collections.emptyMap();
+
+    // Track active worker threads so we can dump their stacks on timeout
+    private static final java.util.concurrent.CopyOnWriteArrayList<Thread> activeWorkerThreads =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
 
     private static final String THREAD_NAME_PREFIX = "EntityThreading-Worker-";
+
+    // Safety timeout — 3 seconds is long enough for any reasonable entity tick
+    private static final long WORKER_TIMEOUT_MS = 3_000;
+
+    // Hard cap on worker threads — more than 4 causes more contention than speedup
+    private static final int MAX_THREADS = 4;
+
+    // Cooldown after timeout — disable parallel ticking temporarily
+    private static volatile long cooldownUntil = 0;
+    private static final long COOLDOWN_DURATION_MS = 30_000; // 30 seconds
 
     static {
         initThreadPool();
@@ -64,24 +80,26 @@ public class EntityTickScheduler {
             threadPool.shutdownNow();
         }
 
-        // Custom thread factory to tag our threads for reliable isEntityThread() check
-        ForkJoinPool.ForkJoinWorkerThreadFactory factory = pool -> {
-            ForkJoinWorkerThread worker = ForkJoinPool.defaultForkJoinWorkerThreadFactory.newThread(pool);
-            worker.setName(THREAD_NAME_PREFIX + worker.getPoolIndex());
-            return worker;
-        };
-
-        threadPool = new ForkJoinPool(threads, factory, (t, e) -> {
-            System.err.println("[EntityThreading] FATAL error in worker thread " + t.getName() + ": " + e.getMessage());
-            e.printStackTrace();
-        }, true);
+        threadPool = Executors.newFixedThreadPool(threads, r -> {
+            Thread t = new Thread(r);
+            t.setName(THREAD_NAME_PREFIX + t.getId());
+            t.setDaemon(true);
+            return t;
+        });
 
         currentThreadCount = threads;
-        System.out.println("[EntityThreading] Thread pool initialized: " + threads + " workers");
+        System.out.println("[EntityThreading] Thread pool: " + threads + " workers");
     }
 
     public static void rebuildBlacklist() {
         blacklistedClasses.clear();
+
+        // HARDCODED — these MUST always be on main thread regardless of config
+        // EntityItem: Quark hooks EntityItem.onUpdate() with WeakHashMap (not thread-safe)
+        // EntityXPOrb: Similar lightweight entity, no benefit from parallel ticking
+        blacklistedClasses.add("net.minecraft.entity.item.EntityItem");
+        blacklistedClasses.add("net.minecraft.entity.item.EntityXPOrb");
+
         if (EntityThreadingConfig.blacklistedEntities != null) {
             for (String cls : EntityThreadingConfig.blacklistedEntities) {
                 if (cls != null && !cls.trim().isEmpty()) {
@@ -91,318 +109,316 @@ public class EntityTickScheduler {
         }
     }
 
-    /**
-     * Called by ASM hook instead of World.updateEntity(entity).
-     * Collects entities for batch processing.
-     */
     public static void queueEntity(World world, Entity entity) {
-        if (!EntityThreadingConfig.enabled || !isEntityThread()) {
-            // Not a worker thread (likely main thread) - tick directly but avoid recursion
-            // We use the patched method but our Mixin logic will ensure it's not queued
-            // again
-            // if we are on the main thread.
-            // Wait, if we call world.updateEntity(entity) here, it's redirected again.
-            // We need a way to call the ORIGINAL updateEntity.
+        if (!EntityThreadingConfig.enabled || world.isRemote) {
+            // Disabled or client-side — tick directly on main thread via vanilla
             ((IMixinWorld) world).entitythreading$tickEntityDirectly(entity);
             return;
         }
 
-        // Players ALWAYS tick on main thread (network packets, movement, inventory)
+        // Players ALWAYS tick on main thread (network, inventory, packets)
         if (entity instanceof EntityPlayer) {
-            mainThreadEntities.add(new EntityTickEntry(world, entity));
+            mainThreadEntities.get().add(new EntityTickEntry(world, entity));
             return;
         }
 
         String className = entity.getClass().getName();
 
-        // Blacklisted entities (config + runtime auto-blacklisted) tick on main thread
-        if (blacklistedClasses.contains(className) || runtimeBlacklisted.contains(className)) {
-            mainThreadEntities.add(new EntityTickEntry(world, entity));
+        // Blacklisted entities go to main thread
+        if (blacklistedClasses.contains(className)) {
+            mainThreadEntities.get().add(new EntityTickEntry(world, entity));
             return;
         }
 
-        if (isBalancedMode()) {
-            allEntities.add(new EntityTickEntry(world, entity));
-        } else {
-            // Region mode
-            int regionSize = EntityThreadingConfig.regionSize;
-            int regionX = Math.floorDiv(entity.chunkCoordX, regionSize);
-            int regionZ = Math.floorDiv(entity.chunkCoordZ, regionSize);
-            int dimension = world.provider.getDimension();
-
-            ChunkGroupKey key = new ChunkGroupKey(dimension, regionX, regionZ);
-            EntityGroup group = groups.computeIfAbsent(key, k -> new EntityGroup(world));
-            group.addEntity(entity);
-        }
+        parallelEntities.get().add(new EntityTickEntry(world, entity));
     }
 
     /**
      * Called by ASM hook at the end of World.updateEntities().
-     * Ticks main thread entities, dispatches worker threads, waits, replays
-     * deferred actions.
+     * Ticks all queued entities and replays deferred actions.
      */
     public static void waitForFinish() {
         if (!EntityThreadingConfig.enabled) {
             return;
         }
 
-        // 1. Tick main thread entities first (players, blacklisted)
-        if (!mainThreadEntities.isEmpty()) {
-            EntityTickEntry[] mainArray;
-            synchronized (mainThreadEntities) {
-                mainArray = mainThreadEntities.toArray(new EntityTickEntry[0]);
-                mainThreadEntities.clear();
-            }
+        List<EntityTickEntry> parallel = parallelEntities.get();
+        List<EntityTickEntry> mainThread = mainThreadEntities.get();
 
-            for (EntityTickEntry entry : mainArray) {
-                try {
-                    entry.world.updateEntity(entry.entity);
-                } catch (Exception e) {
-                    System.err.println("[EntityThreading] Error ticking main thread entity " +
+        // Determine side
+        boolean isRemote = false;
+        if (!parallel.isEmpty()) {
+            isRemote = parallel.get(0).world.isRemote;
+        } else if (!mainThread.isEmpty()) {
+            isRemote = mainThread.get(0).world.isRemote;
+        } else {
+            return;
+        }
+
+        // 1. Tick main-thread-only entities first (players, blacklisted)
+        tickMainThreadEntities(mainThread);
+
+        // 2. Parallel tick (or main-thread-only if below threshold or in cooldown)
+        int parallelCount = parallel.size();
+        if (parallelCount > 0) {
+            boolean inCooldown = System.currentTimeMillis() < cooldownUntil;
+            if (parallelCount < EntityThreadingConfig.minEntitiesForThreading || inCooldown) {
+                // Below threshold or cooling down after timeout — tick on main thread
+                tickAllOnMainThread(parallel, isRemote);
+            } else {
+                tickParallel(parallel, isRemote);
+            }
+        }
+
+        // 3. Replay ALL deferred world mutations on main thread
+        int deferred = DeferredActionQueue.replayAll(isRemote);
+
+        if (EntityThreadingConfig.debugLogging) {
+            System.out.println("[EntityThreading] Ticked " + (mainThread.size() + parallelCount) +
+                    " entities, " + deferred + " deferred on " + (isRemote ? "Client" : "Server"));
+        }
+    }
+
+    private static void tickMainThreadEntities(List<EntityTickEntry> entries) {
+        if (entries.isEmpty()) return;
+
+        for (int i = 0, size = entries.size(); i < size; i++) {
+            EntityTickEntry entry = entries.get(i);
+            try {
+                // Use vanilla updateEntity — safe on main thread
+                entry.world.updateEntity(entry.entity);
+            } catch (Exception e) {
+                System.err.println("[EntityThreading] Main thread tick error: " +
+                        entry.entity.getClass().getSimpleName() + ": " + e.getMessage());
+            }
+        }
+        entries.clear();
+    }
+
+    /**
+     * Tick all parallel entities on main thread (below threshold).
+     * Uses vanilla updateEntity — safe because we're single-threaded.
+     */
+    private static void tickAllOnMainThread(List<EntityTickEntry> entries, boolean isRemote) {
+        for (int i = 0, size = entries.size(); i < size; i++) {
+            EntityTickEntry entry = entries.get(i);
+            try {
+                entry.world.updateEntity(entry.entity);
+            } catch (Exception e) {
+                if (loggedErrorClasses.add(entry.entity.getClass().getName())) {
+                    System.err.println("[EntityThreading] Tick error: " +
                             entry.entity.getClass().getSimpleName() + ": " + e.getMessage());
                 }
             }
         }
-
-        // 2. Dispatch worker threads
-        if (isBalancedMode()) {
-            tickBalanced();
-        } else {
-            tickRegionBased();
-        }
-
-        // 3. Replay deferred world mutations on the main thread
-        int deferred = DeferredActionQueue.replayAll();
-        lastDeferredCount = deferred;
-
-        if (EntityThreadingConfig.debugLogging) {
-            System.out.println("[EntityThreading] Ticked " + lastEntityCount + " entities across " +
-                    lastThreadsUsed + " threads, " + lastDeferredCount + " deferred actions replayed");
-        }
+        entries.clear();
     }
 
-    // ==================== BALANCED MODE ====================
-
-    private static void tickBalanced() {
-        EntityTickEntry[] tickArray;
-        synchronized (allEntities) {
-            if (allEntities.isEmpty())
-                return;
-            tickArray = allEntities.toArray(new EntityTickEntry[0]);
-            allEntities.clear();
+    /**
+     * Build a snapshot of all loaded chunks for the given world.
+     * Called on the main thread before starting worker threads.
+     * Workers use this snapshot instead of touching ChunkProvider directly.
+     */
+    private static void buildChunkSnapshot(World world) {
+        HashMap<Long, Chunk> snapshot = new HashMap<>(1024);
+        try {
+            // Cast is safe — parallel ticking only runs on server side (world.isRemote == false)
+            ChunkProviderServer provider = (ChunkProviderServer) world.getChunkProvider();
+            for (Chunk chunk : provider.getLoadedChunks()) {
+                snapshot.put(ChunkPos.asLong(chunk.x, chunk.z), chunk);
+            }
+        } catch (Exception e) {
+            System.err.println("[EntityThreading] Failed to build chunk snapshot: " + e.getMessage());
         }
+        chunkSnapshot = snapshot;
+    }
+
+    /**
+     * Get a chunk from the pre-built snapshot. Used by MixinWorld for worker threads.
+     * @return the chunk, or null if not in the snapshot
+     */
+    public static Chunk getChunkFromSnapshot(int x, int z) {
+        return chunkSnapshot.get(ChunkPos.asLong(x, z));
+    }
+
+    /**
+     * Core parallel ticking with main thread participation.
+     * Main thread takes a batch too — no idle waiting.
+     */
+    private static void tickParallel(List<EntityTickEntry> entries, boolean isRemote) {
+        EntityTickEntry[] tickArray = entries.toArray(new EntityTickEntry[0]);
+        entries.clear();
 
         int totalEntities = tickArray.length;
-        int threads = currentThreadCount;
-        int actualThreads = Math.min(threads, totalEntities);
-        if (actualThreads <= 0)
+        int workerCount = currentThreadCount;
+
+        // Build chunk snapshot BEFORE starting workers (main thread, safe)
+        buildChunkSnapshot(tickArray[0].world);
+
+        // Split ALL entities among worker threads — main thread does NOT process entities
+        // This ensures the timeout ALWAYS works (main thread never hangs in entity code)
+        int batchSize = Math.max(EntityThreadingConfig.minBatchSize,
+                (totalEntities + workerCount - 1) / workerCount);
+
+        // Count actual worker batches needed
+        int actualWorkers = 0;
+        for (int t = 0; t < workerCount; t++) {
+            if (t * batchSize >= totalEntities) break;
+            actualWorkers++;
+        }
+
+        if (actualWorkers == 0) {
+            chunkSnapshot = Collections.emptyMap();
             return;
+        }
 
-        int batchSize = (totalEntities + actualThreads - 1) / actualThreads;
-        CountDownLatch latch = new CountDownLatch(actualThreads);
+        // Submit ALL entities to worker threads
+        CountDownLatch latch = new CountDownLatch(actualWorkers);
+        activeWorkerThreads.clear();
 
-        for (int t = 0; t < actualThreads; t++) {
-            int start = t * batchSize;
-            int end = Math.min(start + batchSize, totalEntities);
-
+        for (int t = 0; t < actualWorkers; t++) {
+            final int start = t * batchSize;
+            final int end = Math.min(start + batchSize, totalEntities);
             threadPool.execute(() -> {
+                Thread currentThread = Thread.currentThread();
+                activeWorkerThreads.add(currentThread);
+                IS_WORKER_THREAD.set(true);
+                currentSideIsRemote.set(isRemote);
                 try {
                     for (int i = start; i < end; i++) {
-                        EntityTickEntry entry = tickArray[i];
-                        safeTick(entry.world, entry.entity);
+                        safeTick(tickArray[i].world, tickArray[i].entity);
                     }
                 } finally {
+                    IS_WORKER_THREAD.set(false);
+                    activeWorkerThreads.remove(currentThread);
                     latch.countDown();
                 }
             });
         }
 
-        // Deadlock-resistant wait: process deferred actions while waiting for workers
-        while (latch.getCount() > 0) {
-            if (!DeferredActionQueue.replayOne()) {
-                // If no deferred actions, do a tiny sleep to prevent 100% CPU usage on main
-                // thread
-                try {
-                    Thread.sleep(1);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
+        // Main thread ONLY waits — guaranteed to reach timeout if any worker hangs
+        try {
+            if (!latch.await(WORKER_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                // Workers are stuck — dump their stack traces for diagnostics
+                int stuckCount = (int) latch.getCount();
+                System.err.println("[EntityThreading] WARNING: " + stuckCount +
+                        " worker(s) stuck after " + WORKER_TIMEOUT_MS + "ms!");
+                for (Thread worker : activeWorkerThreads) {
+                    System.err.println("[EntityThreading] Stuck thread: " + worker.getName());
+                    for (StackTraceElement ste : worker.getStackTrace()) {
+                        System.err.println("    at " + ste);
+                    }
                 }
+                activeWorkerThreads.clear();
+
+                // Enter cooldown — disable parallel ticking for 30 seconds
+                // DO NOT recreate pool — that leaks spinning threads and causes 100% CPU
+                cooldownUntil = System.currentTimeMillis() + COOLDOWN_DURATION_MS;
+                System.err.println("[EntityThreading] Parallel ticking disabled for " +
+                        (COOLDOWN_DURATION_MS / 1000) + "s cooldown. Entities will tick on main thread.");
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
 
-        lastEntityCount = totalEntities;
-        lastThreadsUsed = actualThreads;
+        // Release chunk snapshot
+        chunkSnapshot = Collections.emptyMap();
     }
 
     /**
-     * Safely tick a single entity on a worker thread.
-     * Mirror of World.updateEntityWithOptionalForce but defers side-effects.
+     * Safely tick a single entity WITHOUT calling world.updateEntity().
+     *
+     * entity.onUpdate() may still access world.getBlockState() → getChunk(),
+     * but MixinWorld redirects getChunk() calls from entity threads to use
+     * our chunk snapshot instead of the non-thread-safe ChunkProvider.
      */
-    public static void safeTick(World world, Entity entity) {
-        // Snapshot for chunk check
-        int cx = entity.chunkCoordX;
-        int cy = entity.chunkCoordY;
-        int cz = entity.chunkCoordZ;
+    private static void safeTick(World world, Entity entity) {
+        int oldCX = entity.chunkCoordX;
+        int oldCY = entity.chunkCoordY;
+        int oldCZ = entity.chunkCoordZ;
 
         try {
-            // Update last pos (Crucial for client-side interpolation - fixes "jittering")
-            entity.lastTickPosX = entity.posX;
-            entity.lastTickPosY = entity.posY;
-            entity.lastTickPosZ = entity.posZ;
-            entity.prevRotationYaw = entity.rotationYaw;
-            entity.prevRotationPitch = entity.rotationPitch;
+            // Replicate vanilla World.updateEntity() pre-tick logic
+            if (!entity.isRiding()) {
+                entity.lastTickPosX = entity.posX;
+                entity.lastTickPosY = entity.posY;
+                entity.lastTickPosZ = entity.posZ;
+                entity.prevRotationYaw = entity.rotationYaw;
+                entity.prevRotationPitch = entity.rotationPitch;
+            }
 
-            if (entity.addedToChunk) {
+            if (entity.addedToChunk || entity.forceSpawn) {
                 entity.ticksExisted++;
 
-                // Mounts update their passengers, so we only tick if NOT riding something
                 if (entity.isRiding()) {
                     entity.updateRidden();
                 } else {
                     entity.onUpdate();
                 }
             }
-
-            // Defer unsafe side-effects to main thread
-
-            // 1. Chunk boundary check (Calculated manually since chunkCoordX isn't updated
-            // till updateChunkPos)
-            int newCX = MathHelper.floor(entity.posX / 16.0D);
-            int newCY = MathHelper.floor(entity.posY / 16.0D);
-            int newCZ = MathHelper.floor(entity.posZ / 16.0D);
-
-            if (newCX != cx || newCY != cy || newCZ != cz) {
-                DeferredActionQueue.enqueue(() -> ((IMixinWorld) world).entitythreading$updateChunkPos(entity));
-            }
-
-            // Entity tracker (Syncs pos/data to clients) happens automatically in
-            // EntityTracker.tick()
-            // after World.updateEntities(). No manual call needed here.
         } catch (Throwable t) {
-            autoBlacklist(entity.getClass().getName(), entity.getClass().getSimpleName(), t.getMessage(), t);
-        }
-    }
-
-    /**
-     * Called by EntityGroup to auto-blacklist a failing entity class.
-     * Public so it can be called from EntityGroup.runTick().
-     */
-    public static void autoBlacklist(String className, String simpleName, String errorMsg, Throwable t) {
-        runtimeBlacklisted.add(className);
-        if (loggedErrorClasses.add(className)) {
-            System.err.println("[EntityThreading] Auto-blacklisted " + simpleName +
-                    " (thread-unsafe, will tick on main thread): " + errorMsg);
-            if (t != null) {
+            // Log once per class, continue — do NOT blacklist
+            if (loggedErrorClasses.add(entity.getClass().getName())) {
+                System.err.println("[EntityThreading] " +
+                        entity.getClass().getSimpleName() + " tick error (continuing): " + t.getMessage());
                 t.printStackTrace();
             }
-        }
-    }
-
-    // ==================== REGION MODE ====================
-
-    private static void tickRegionBased() {
-        List<EntityGroup> activeTasks = new ArrayList<>();
-        List<ChunkGroupKey> toEvict = new ArrayList<>();
-
-        for (Map.Entry<ChunkGroupKey, EntityGroup> entry : groups.entrySet()) {
-            EntityGroup group = entry.getValue();
-            if (group.hasEntities()) {
-                activeTasks.add(group);
-                group.resetIdleTicks();
-            } else {
-                if (group.incrementIdleAndCheck(EntityThreadingConfig.groupEvictionTicks)) {
-                    toEvict.add(entry.getKey());
-                }
-            }
-        }
-
-        for (ChunkGroupKey key : toEvict) {
-            groups.remove(key);
-        }
-
-        if (activeTasks.isEmpty()) {
-            lastEntityCount = 0;
-            lastThreadsUsed = 0;
             return;
         }
 
-        int taskCount = activeTasks.size();
-        CountDownLatch latch = new CountDownLatch(taskCount);
+        // Detect chunk boundary crossing → defer to main thread
+        int newCX = MathHelper.floor(entity.posX / 16.0D);
+        int newCY = MathHelper.floor(entity.posY / 16.0D);
+        int newCZ = MathHelper.floor(entity.posZ / 16.0D);
 
-        int totalEntities = 0;
-        for (EntityGroup group : activeTasks) {
-            totalEntities += group.getEntityCount();
-            threadPool.execute(() -> {
-                try {
-                    group.runTick();
-                } catch (Throwable t) {
-                    System.err.println("[EntityThreading] Error in group tick: " + t.getMessage());
-                } finally {
-                    latch.countDown();
-                }
-            });
+        if (newCX != oldCX || newCY != oldCY || newCZ != oldCZ) {
+            DeferredActionQueue.enqueue(() -> ((IMixinWorld) world).entitythreading$updateChunkPos(entity));
         }
-
-        // Deadlock-resistant wait: process deferred actions while waiting for workers
-        while (latch.getCount() > 0) {
-            if (!DeferredActionQueue.replayOne()) {
-                try {
-                    Thread.sleep(1);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-            }
-        }
-
-        lastEntityCount = totalEntities;
-        lastThreadsUsed = taskCount;
-    }
-
-    // ==================== UTILITY ====================
-
-    private static boolean isBalancedMode() {
-        return "balanced".equalsIgnoreCase(EntityThreadingConfig.distributionMode);
     }
 
     /**
-     * Returns true if the current thread is a worker thread from our pool.
-     * Used by Mixins to decide whether to defer unsafe world operations.
+     * Returns true if current thread is a worker thread from our pool.
      */
     public static boolean isEntityThread() {
-        return Thread.currentThread().getName().startsWith(THREAD_NAME_PREFIX);
+        return IS_WORKER_THREAD.get();
     }
 
     /**
-     * Reinitialize thread pool and blacklist (called on config change).
+     * Returns the side (Client vs Server) the current thread is processing.
      */
+    public static boolean isCurrentThreadRemote() {
+        return currentSideIsRemote.get();
+    }
+
+    /**
+     * Get the shared thread pool for use by other components.
+     */
+    public static ExecutorService getSharedPool() {
+        return threadPool;
+    }
+
     public static void reinitialize() {
         initThreadPool();
         rebuildBlacklist();
     }
 
-    /**
-     * Shutdown the thread pool (called on server stop).
-     */
     public static void shutdown() {
         if (threadPool != null) {
             threadPool.shutdown();
             try {
-                if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
+                if (!threadPool.awaitTermination(3, TimeUnit.SECONDS)) {
                     threadPool.shutdownNow();
                 }
             } catch (InterruptedException e) {
                 threadPool.shutdownNow();
             }
         }
-        groups.clear();
-        allEntities.clear();
-        mainThreadEntities.clear();
+        parallelEntities.get().clear();
+        mainThreadEntities.get().clear();
         DeferredActionQueue.clear();
+        chunkSnapshot = Collections.emptyMap();
     }
 
-    // Simple data holder — no extra allocations
     private static class EntityTickEntry {
         final World world;
         final Entity entity;

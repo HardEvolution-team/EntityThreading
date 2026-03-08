@@ -10,69 +10,59 @@ import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 @Config(modid = "entity_threader", name = "EntityThreading")
 public class EntityThreadingConfig {
 
-    @Config.Comment("Master switch to enable/disable entity threading.")
+    @Config.Comment("Master switch to enable/disable parallel entity ticking.")
     public static boolean enabled = true;
 
     @Config.Comment({
-        "Thread count mode:",
-        "  auto   = Use all available CPU cores minus 2 (minimum 4)",
-        "  manual = Use the exact value from 'manualThreadCount'",
-        "  max    = Use ALL available CPU cores for maximum throughput"
+            "Thread count mode:",
+            "  auto   = CPU cores / 2 (minimum 2, maximum 4)",
+            "  manual = Use the exact value from 'manualThreadCount'",
+            "  max    = Use all available CPU cores minus 1"
     })
     public static String threadMode = "auto";
 
     @Config.Comment({
-        "Number of worker threads when threadMode = manual.",
-        "Ignored in auto/max modes.",
-        "For 10k+ entities, use 8-16 threads."
+            "Number of worker threads when threadMode = manual.",
+            "Recommended: 2-4 for most setups."
     })
-    @Config.RangeInt(min = 1, max = 128)
-    public static int manualThreadCount = 8;
+    @Config.RangeInt(min = 1, max = 16)
+    public static int manualThreadCount = 3;
 
     @Config.Comment({
-        "How to distribute entities across threads:",
-        "  balanced = Split all entities evenly across all threads (best for 10k+)",
-        "  region   = Group by chunk region (better spatial locality, less parallelism)"
+            "Entity classes to exclude from parallel ticking.",
+            "Use full class names. These entities will always tick on the main thread.",
+            "EntityItem is blacklisted by default because Quark hooks it with a WeakHashMap (not thread-safe).",
+            "Example: \"net.minecraft.entity.boss.EntityDragon\""
     })
-    public static String distributionMode = "balanced";
+    public static String[] blacklistedEntities = new String[] {
+            "net.minecraft.entity.item.EntityItem",
+            "net.minecraft.entity.item.EntityXPOrb"
+    };
 
-    @Config.Comment({
-        "Region size when distributionMode = region (in chunks).",
-        "Entities in NxN chunk areas are grouped together.",
-        "Default: 2"
-    })
-    @Config.RangeInt(min = 1, max = 8)
-    public static int regionSize = 2;
-
-    @Config.Comment({
-        "Max ticks an empty entity group stays cached before being evicted.",
-        "Only used in region mode. Default: 600"
-    })
-    @Config.RangeInt(min = 20, max = 6000)
-    public static int groupEvictionTicks = 600;
-
-    @Config.Comment({
-        "Entity classes to exclude from threaded ticking.",
-        "Full class names. Example: \"net.minecraft.entity.boss.EntityDragon\""
-    })
-    public static String[] blacklistedEntities = new String[]{};
-
-    @Config.Comment("Enable debug logging (prints entity counts, thread stats each tick).")
+    @Config.Comment("Enable debug logging (entity counts, thread stats per tick).")
     public static boolean debugLogging = false;
 
-    /**
-     * Compute the actual thread count based on the current threadMode.
-     */
+    @Config.Comment("Enable asynchronous pathfinding. EXPERIMENTAL — may cause AI glitches.")
+    public static boolean asyncPathfinding = false;
+
+    @Config.Comment("Minimum number of entities to enable parallel ticking. Below this, main thread is faster.")
+    @Config.RangeInt(min = 10, max = 1000)
+    public static int minEntitiesForThreading = 100;
+
+    @Config.Comment("Minimum batch size per worker thread. Too small = thread overhead outweighs benefits.")
+    @Config.RangeInt(min = 10, max = 500)
+    public static int minBatchSize = 50;
+
     public static int getEffectiveThreadCount() {
         int cores = Runtime.getRuntime().availableProcessors();
         switch (threadMode.toLowerCase()) {
             case "max":
-                return Math.max(2, cores);
+                return Math.max(2, cores - 1);
             case "manual":
-                return Math.max(1, manualThreadCount);
+                return Math.max(1, Math.min(manualThreadCount, cores));
             case "auto":
             default:
-                return Math.max(4, cores - 2);
+                return Math.max(2, Math.min(cores / 2, 4));
         }
     }
 
@@ -82,7 +72,6 @@ public class EntityThreadingConfig {
         public static void onConfigChanged(ConfigChangedEvent.OnConfigChangedEvent event) {
             if (event.getModID().equals("entity_threader")) {
                 ConfigManager.sync("entity_threader", Config.Type.INSTANCE);
-                // Hot-reload thread pool and blacklist
                 EntityTickScheduler.reinitialize();
             }
         }
