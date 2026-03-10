@@ -3,7 +3,7 @@ package ded.entitythreading;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
 
-@Mod(modid = "entity_threader", name = "EntityThreading", version = "1.0", acceptableRemoteVersions = "*", updateJSON = "")
+@Mod(modid = "entity_threader", name = "EntityThreading", version = Tags.VERSION, acceptableRemoteVersions = "*", updateJSON = "")
 public class EntityThreadingMod {
 
     @Mod.Instance("entity_threader")

@@ -1,0 +1,14 @@
+{
+  "package": "ded.chunkgenthreading.mixin",
+  "refmap": "mixins.chunk_gen_threader.refmap.json",
+  "target": "@env(DEFAULT)",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "mixins": [
+    "MixinChunkProviderServer",
+    "MixinWorldChunkGen",
+    "MixinWorldServerChunkGen"
+  ],
+  "client": [],
+  "server": []
+}

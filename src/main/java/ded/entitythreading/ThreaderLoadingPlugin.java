@@ -11,8 +11,10 @@ public class ThreaderLoadingPlugin implements IFMLLoadingPlugin {
 
     @Override
     public String[] getASMTransformerClass() {
-        System.out.println("[EntityThreading] Registering ASM transformer...");
-        return new String[] { "ded.entitythreading.transform.WorldClassTransformer" };
+        System.out.println("[EntityThreading] Registering ASM transformers...");
+        return new String[] {
+                "ded.entitythreading.transform.WorldClassTransformer"
+        };
     }
 
     @Override
@@ -28,9 +30,9 @@ public class ThreaderLoadingPlugin implements IFMLLoadingPlugin {
 
     @Override
     public void injectData(Map<String, Object> data) {
-        System.out.println("[EntityThreading] Registering mixin config...");
+        System.out.println("[EntityThreading] Registering mixin configs...");
         Mixins.addConfiguration("mixins.entity_threader.json");
-        System.out.println("[EntityThreading] Ultimate parallel entity ticking loaded.");
+        System.out.println("[EntityThreading] Parallel entity ticking loaded.");
     }
 
     @Override

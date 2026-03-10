@@ -155,6 +155,10 @@ public class EntityTickScheduler {
             return;
         }
 
+        // Set ThreadLocals for main thread in case it runs safeTick (e.g. during replay or fallback)
+        currentSideIsRemote.set(isRemote);
+        IS_WORKER_THREAD.set(false);
+
         // 1. Tick main-thread-only entities first (players, blacklisted)
         tickMainThreadEntities(mainThread);
 
@@ -364,6 +368,28 @@ public class EntityTickScheduler {
                 t.printStackTrace();
             }
             return;
+        }
+
+        try {
+            if (!entity.getPassengers().isEmpty()) {
+                for (Entity passenger : new ArrayList<>(entity.getPassengers())) {
+                    if (!passenger.isDead && passenger.getRidingEntity() == entity) {
+                        if (passenger instanceof EntityPlayer || blacklistedClasses.contains(passenger.getClass().getName())) {
+                            DeferredActionQueue.enqueue(() -> safeTick(world, passenger));
+                        } else {
+                            safeTick(world, passenger);
+                        }
+                    } else {
+                        DeferredActionQueue.enqueue(() -> {
+                            try { passenger.dismountRidingEntity(); } catch (Exception e) {}
+                        });
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            if (loggedErrorClasses.add(entity.getClass().getName() + "_passenger_loop")) {
+                t.printStackTrace();
+            }
         }
 
         // Detect chunk boundary crossing → defer to main thread
