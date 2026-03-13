@@ -123,9 +123,11 @@ public class EntityTickScheduler {
         }
 
         String className = entity.getClass().getName();
+        net.minecraft.util.ResourceLocation registryName = net.minecraft.entity.EntityList.getKey(entity);
+        String regNameStr = registryName != null ? registryName.toString() : null;
 
         // Blacklisted entities go to main thread
-        if (blacklistedClasses.contains(className)) {
+        if (blacklistedClasses.contains(className) || (regNameStr != null && blacklistedClasses.contains(regNameStr))) {
             mainThreadEntities.get().add(new EntityTickEntry(world, entity));
             return;
         }

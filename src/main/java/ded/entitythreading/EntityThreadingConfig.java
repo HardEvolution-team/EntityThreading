@@ -29,14 +29,19 @@ public class EntityThreadingConfig {
     public static int manualThreadCount = 3;
 
     @Config.Comment({
-            "Entity classes to exclude from parallel ticking.",
-            "Use full class names. These entities will always tick on the main thread.",
+            "Entities to exclude from parallel ticking.",
+            "You can use full class names OR registry names.",
+            "These entities will always tick on the main thread.",
             "EntityItem is blacklisted by default because Quark hooks it with a WeakHashMap (not thread-safe).",
-            "Example: \"net.minecraft.entity.boss.EntityDragon\""
+            "Examples:",
+            "  Class: \"net.minecraft.entity.boss.EntityDragon\"",
+            "  Registry Name: \"minecraft:ender_dragon\""
     })
     public static String[] blacklistedEntities = new String[] {
             "net.minecraft.entity.item.EntityItem",
-            "net.minecraft.entity.item.EntityXPOrb"
+            "net.minecraft.entity.item.EntityXPOrb",
+            "net.minecraft.entity.player.EntityPlayer",
+            "net.minecraft.entity.player.EntityPlayerMP"
     };
 
     @Config.Comment("Enable debug logging (entity counts, thread stats per tick).")
