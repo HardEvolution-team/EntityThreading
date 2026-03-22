@@ -186,7 +186,7 @@ public abstract class MixinWorld implements IMixinWorld {
             if (cached != null) {
                 cir.setReturnValue(cached);
             } else {
-                cir.setReturnValue(new net.minecraft.world.chunk.EmptyChunk((World) (Object) this, x, z));
+                cir.setReturnValue(new Chunk((World) (Object) this, x, z));
             }
         }
     }

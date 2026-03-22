@@ -6,12 +6,12 @@
   "compatibilityLevel": "JAVA_8",
   "mixins": [
     "MixinWorld",
-    "MixinChunk",
     "MixinClassInheritanceMultiMap",
     "MixinWorldServer",
     "MixinPathNavigate",
     "MixinVillage",
     "MixinVillageCollection",
+    "MixinMapStorage",
     "MixinAlfheimLightingEngine",
     "accessor.PathFinderAccessor"
   ],
