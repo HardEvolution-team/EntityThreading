@@ -15,16 +15,6 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Parallel entity tick scheduler.
- *
- * Key design decisions:
- * 1. Worker threads call entity.onUpdate() directly — NOT world.updateEntity()
- * 2. Chunk snapshot is built before parallel ticking — workers NEVER touch ChunkProvider
- * 3. Chunk position updates are deferred to main thread
- * 4. Main thread participates as a worker (no idle CPU)
- * 5. latch.await() has a timeout — prevents permanent server freeze if a worker hangs
- */
 public class EntityTickScheduler {
 
     private static volatile ExecutorService threadPool;
@@ -32,6 +22,7 @@ public class EntityTickScheduler {
 
     // Blacklisted entity class names
     private static final Set<String> blacklistedClasses = ConcurrentHashMap.newKeySet();
+    private static final Set<String> blacklistedModIds = ConcurrentHashMap.newKeySet();
     private static final Set<String> loggedErrorClasses = ConcurrentHashMap.newKeySet();
 
     // Entity collection buffers — ThreadLocal for client/server isolation
@@ -93,6 +84,7 @@ public class EntityTickScheduler {
 
     public static void rebuildBlacklist() {
         blacklistedClasses.clear();
+        blacklistedModIds.clear();
 
         // HARDCODED — these MUST always be on main thread regardless of config
         // EntityItem: Quark hooks EntityItem.onUpdate() with WeakHashMap (not thread-safe)
@@ -102,11 +94,15 @@ public class EntityTickScheduler {
 
         if (EntityThreadingConfig.blacklistedEntities != null) {
             for (String cls : EntityThreadingConfig.blacklistedEntities) {
-                if (cls != null && !cls.trim().isEmpty()) {
-                    blacklistedClasses.add(cls.trim());
-                }
+                if (cls != null && !cls.trim().isEmpty()) blacklistedClasses.add(cls.trim());
             }
         }
+
+        blacklistedModIds.add("hbm");
+    }
+
+    public static boolean isModEventBlacklisted(String modId) {
+        return blacklistedModIds.contains(modId);
     }
 
     public static void queueEntity(World world, Entity entity) {
@@ -116,16 +112,14 @@ public class EntityTickScheduler {
             return;
         }
 
-        // Players ALWAYS tick on main thread (network, inventory, packets)
-        if (entity instanceof EntityPlayer) {
+        if (entity instanceof EntityPlayer || blacklistedClasses.contains(entity.getClass().getName())) {
             mainThreadEntities.get().add(new EntityTickEntry(world, entity));
             return;
         }
 
-        String className = entity.getClass().getName();
-
-        // Blacklisted entities go to main thread
-        if (blacklistedClasses.contains(className)) {
+        // tbh NTM has enough quirks to deal with, I'd rather let it do it's own work as it alerady has multi-threading radiation e.g.
+        // we don't want to multi-thread multi-threading, right?
+        if (entity.getClass().getName().startsWith("com.hbm.")) {
             mainThreadEntities.get().add(new EntityTickEntry(world, entity));
             return;
         }
@@ -138,22 +132,16 @@ public class EntityTickScheduler {
      * Ticks all queued entities and replays deferred actions.
      */
     public static void waitForFinish() {
-        if (!EntityThreadingConfig.enabled) {
-            return;
-        }
+        if (!EntityThreadingConfig.enabled) return;
 
         List<EntityTickEntry> parallel = parallelEntities.get();
         List<EntityTickEntry> mainThread = mainThreadEntities.get();
 
         // Determine side
         boolean isRemote;
-        if (!parallel.isEmpty()) {
-            isRemote = parallel.get(0).world.isRemote;
-        } else if (!mainThread.isEmpty()) {
-            isRemote = mainThread.get(0).world.isRemote;
-        } else {
-            return;
-        }
+        if (!parallel.isEmpty()) isRemote = parallel.get(0).world.isRemote;
+        else if (!mainThread.isEmpty()) isRemote = mainThread.get(0).world.isRemote;
+        else return;
 
         // Set ThreadLocals for main thread in case it runs safeTick (e.g. during replay or fallback)
         currentSideIsRemote.set(isRemote);
@@ -198,10 +186,6 @@ public class EntityTickScheduler {
         entries.clear();
     }
 
-    /**
-     * Tick all parallel entities on main thread (below threshold).
-     * Uses vanilla updateEntity — safe because we're single-threaded.
-     */
     private static void tickAllOnMainThread(List<EntityTickEntry> entries) {
         for (EntityTickEntry entry : entries) {
             try {
@@ -274,9 +258,8 @@ public class EntityTickScheduler {
                 currentSideIsRemote.set(isRemote);
                 try {
                     int i;
-                    // Grab a small batch to balance low contention with fine-grained load balancing
-                    while ((i = currentIndex.getAndAdd(16)) < totalEntities) {
-                        int end = Math.min(i + 16, totalEntities);
+                    while ((i = currentIndex.getAndAdd(32)) < totalEntities) {
+                        int end = Math.min(i + 32, totalEntities);
                         for (int j = i; j < end; j++) {
                             safeTick(tickArray[j].world, tickArray[j].entity);
                         }
@@ -293,8 +276,8 @@ public class EntityTickScheduler {
         currentSideIsRemote.set(isRemote);
         try {
             int i;
-            while ((i = currentIndex.getAndAdd(16)) < totalEntities) {
-                int end = Math.min(i + 16, totalEntities);
+            while ((i = currentIndex.getAndAdd(32)) < totalEntities) {
+                int end = Math.min(i + 32, totalEntities);
                 for (int j = i; j < end; j++) {
                     safeTick(tickArray[j].world, tickArray[j].entity);
                 }
@@ -372,8 +355,10 @@ public class EntityTickScheduler {
         }
 
         try {
-            if (!entity.getPassengers().isEmpty()) {
-                for (Entity passenger : new ArrayList<>(entity.getPassengers())) {
+            List<Entity> passengers = entity.getPassengers();
+            if (!passengers.isEmpty()) {
+                Entity[] passArray = passengers.toArray(new Entity[0]);
+                for (Entity passenger : passArray) {
                     if (!passenger.isDead && passenger.getRidingEntity() == entity) {
                         if (passenger instanceof EntityPlayer || blacklistedClasses.contains(passenger.getClass().getName())) {
                             DeferredActionQueue.enqueue(() -> safeTick(world, passenger));
@@ -430,16 +415,7 @@ public class EntityTickScheduler {
     }
 
     public static void shutdown() {
-        if (threadPool != null) {
-            threadPool.shutdown();
-            try {
-                if (!threadPool.awaitTermination(3, TimeUnit.SECONDS)) {
-                    threadPool.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                threadPool.shutdownNow();
-            }
-        }
+        if (threadPool != null) threadPool.shutdownNow();
         parallelEntities.get().clear();
         mainThreadEntities.get().clear();
         DeferredActionQueue.clear();

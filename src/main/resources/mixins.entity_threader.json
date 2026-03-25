@@ -12,6 +12,7 @@
     "MixinVillage",
     "MixinVillageCollection",
     "MixinMapStorage",
+    "MixinASMEventHandler",
     "MixinAlfheimLightingEngine",
     "accessor.PathFinderAccessor"
   ],
