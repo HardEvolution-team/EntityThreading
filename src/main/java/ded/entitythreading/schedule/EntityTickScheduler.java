@@ -2,6 +2,7 @@ package ded.entitythreading.schedule;
 
 import ded.entitythreading.EntityThreadingConfig;
 import ded.entitythreading.transform.IMixinWorld;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.util.math.ChunkPos;
@@ -12,17 +13,8 @@ import net.minecraft.world.gen.ChunkProviderServer;
 
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Parallel entity tick scheduler.
- *
- * Key design decisions:
- * 1. Worker threads call entity.onUpdate() directly — NOT world.updateEntity()
- * 2. Chunk snapshot is built before parallel ticking — workers NEVER touch ChunkProvider
- * 3. Chunk position updates are deferred to main thread
- * 4. Main thread participates as a worker (no idle CPU)
- * 5. latch.await() has a timeout — prevents permanent server freeze if a worker hangs
- */
 public class EntityTickScheduler {
 
     private static volatile ExecutorService threadPool;
@@ -30,6 +22,7 @@ public class EntityTickScheduler {
 
     // Blacklisted entity class names
     private static final Set<String> blacklistedClasses = ConcurrentHashMap.newKeySet();
+    private static final Set<String> blacklistedModIds = ConcurrentHashMap.newKeySet();
     private static final Set<String> loggedErrorClasses = ConcurrentHashMap.newKeySet();
 
     // Entity collection buffers — ThreadLocal for client/server isolation
@@ -46,21 +39,19 @@ public class EntityTickScheduler {
 
     /**
      * Snapshot of loaded chunks, built on main thread before parallel ticking.
-     * Worker threads read from this instead of ChunkProvider (which is NOT thread-safe).
+     * Uses FastUtil's Long2ObjectOpenHashMap to eliminate primitive boxing overhead.
+     * That's probably the fastest I could do here..
      */
-    private static volatile Map<Long, Chunk> chunkSnapshot = Collections.emptyMap();
+    private static final Long2ObjectOpenHashMap<Chunk> EMPTY_SNAPSHOT = new Long2ObjectOpenHashMap<>(0);
+    private static volatile Long2ObjectOpenHashMap<Chunk> chunkSnapshot = EMPTY_SNAPSHOT;
 
     // Track active worker threads so we can dump their stacks on timeout
-    private static final java.util.concurrent.CopyOnWriteArrayList<Thread> activeWorkerThreads =
-            new java.util.concurrent.CopyOnWriteArrayList<>();
+    private static final CopyOnWriteArrayList<Thread> activeWorkerThreads = new CopyOnWriteArrayList<>();
 
     private static final String THREAD_NAME_PREFIX = "EntityThreading-Worker-";
 
     // Safety timeout — 3 seconds is long enough for any reasonable entity tick
     private static final long WORKER_TIMEOUT_MS = 3_000;
-
-    // Hard cap on worker threads — more than 4 causes more contention than speedup
-    private static final int MAX_THREADS = 4;
 
     // Cooldown after timeout — disable parallel ticking temporarily
     private static volatile long cooldownUntil = 0;
@@ -93,6 +84,7 @@ public class EntityTickScheduler {
 
     public static void rebuildBlacklist() {
         blacklistedClasses.clear();
+        blacklistedModIds.clear();
 
         // HARDCODED — these MUST always be on main thread regardless of config
         // EntityItem: Quark hooks EntityItem.onUpdate() with WeakHashMap (not thread-safe)
@@ -102,11 +94,15 @@ public class EntityTickScheduler {
 
         if (EntityThreadingConfig.blacklistedEntities != null) {
             for (String cls : EntityThreadingConfig.blacklistedEntities) {
-                if (cls != null && !cls.trim().isEmpty()) {
-                    blacklistedClasses.add(cls.trim());
-                }
+                if (cls != null && !cls.trim().isEmpty()) blacklistedClasses.add(cls.trim());
             }
         }
+
+        blacklistedModIds.add("hbm");
+    }
+
+    public static boolean isModEventBlacklisted(String modId) {
+        return blacklistedModIds.contains(modId);
     }
 
     public static void queueEntity(World world, Entity entity) {
@@ -116,16 +112,14 @@ public class EntityTickScheduler {
             return;
         }
 
-        // Players ALWAYS tick on main thread (network, inventory, packets)
-        if (entity instanceof EntityPlayer) {
+        if (entity instanceof EntityPlayer || blacklistedClasses.contains(entity.getClass().getName())) {
             mainThreadEntities.get().add(new EntityTickEntry(world, entity));
             return;
         }
 
-        String className = entity.getClass().getName();
-
-        // Blacklisted entities go to main thread
-        if (blacklistedClasses.contains(className)) {
+        // tbh NTM has enough quirks to deal with, I'd rather let it do it's own work as it alerady has multi-threading radiation e.g.
+        // we don't want to multi-thread multi-threading, right?
+        if (entity.getClass().getName().startsWith("com.hbm.")) {
             mainThreadEntities.get().add(new EntityTickEntry(world, entity));
             return;
         }
@@ -138,22 +132,16 @@ public class EntityTickScheduler {
      * Ticks all queued entities and replays deferred actions.
      */
     public static void waitForFinish() {
-        if (!EntityThreadingConfig.enabled) {
-            return;
-        }
+        if (!EntityThreadingConfig.enabled) return;
 
         List<EntityTickEntry> parallel = parallelEntities.get();
         List<EntityTickEntry> mainThread = mainThreadEntities.get();
 
         // Determine side
-        boolean isRemote = false;
-        if (!parallel.isEmpty()) {
-            isRemote = parallel.get(0).world.isRemote;
-        } else if (!mainThread.isEmpty()) {
-            isRemote = mainThread.get(0).world.isRemote;
-        } else {
-            return;
-        }
+        boolean isRemote;
+        if (!parallel.isEmpty()) isRemote = parallel.get(0).world.isRemote;
+        else if (!mainThread.isEmpty()) isRemote = mainThread.get(0).world.isRemote;
+        else return;
 
         // Set ThreadLocals for main thread in case it runs safeTick (e.g. during replay or fallback)
         currentSideIsRemote.set(isRemote);
@@ -168,7 +156,7 @@ public class EntityTickScheduler {
             boolean inCooldown = System.currentTimeMillis() < cooldownUntil;
             if (parallelCount < EntityThreadingConfig.minEntitiesForThreading || inCooldown) {
                 // Below threshold or cooling down after timeout — tick on main thread
-                tickAllOnMainThread(parallel, isRemote);
+                tickAllOnMainThread(parallel);
             } else {
                 tickParallel(parallel, isRemote);
             }
@@ -186,8 +174,7 @@ public class EntityTickScheduler {
     private static void tickMainThreadEntities(List<EntityTickEntry> entries) {
         if (entries.isEmpty()) return;
 
-        for (int i = 0, size = entries.size(); i < size; i++) {
-            EntityTickEntry entry = entries.get(i);
+        for (EntityTickEntry entry : entries) {
             try {
                 // Use vanilla updateEntity — safe on main thread
                 entry.world.updateEntity(entry.entity);
@@ -199,13 +186,8 @@ public class EntityTickScheduler {
         entries.clear();
     }
 
-    /**
-     * Tick all parallel entities on main thread (below threshold).
-     * Uses vanilla updateEntity — safe because we're single-threaded.
-     */
-    private static void tickAllOnMainThread(List<EntityTickEntry> entries, boolean isRemote) {
-        for (int i = 0, size = entries.size(); i < size; i++) {
-            EntityTickEntry entry = entries.get(i);
+    private static void tickAllOnMainThread(List<EntityTickEntry> entries) {
+        for (EntityTickEntry entry : entries) {
             try {
                 entry.world.updateEntity(entry.entity);
             } catch (Exception e) {
@@ -223,10 +205,10 @@ public class EntityTickScheduler {
      * Called on the main thread before starting worker threads.
      * Workers use this snapshot instead of touching ChunkProvider directly.
      */
+
     private static void buildChunkSnapshot(World world) {
-        HashMap<Long, Chunk> snapshot = new HashMap<>(1024);
+        Long2ObjectOpenHashMap<Chunk> snapshot = new Long2ObjectOpenHashMap<>(1024);
         try {
-            // Cast is safe — parallel ticking only runs on server side (world.isRemote == false)
             ChunkProviderServer provider = (ChunkProviderServer) world.getChunkProvider();
             for (Chunk chunk : provider.getLoadedChunks()) {
                 snapshot.put(ChunkPos.asLong(chunk.x, chunk.z), chunk);
@@ -259,38 +241,28 @@ public class EntityTickScheduler {
         // Build chunk snapshot BEFORE starting workers (main thread, safe)
         buildChunkSnapshot(tickArray[0].world);
 
-        // Split ALL entities among worker threads — main thread does NOT process entities
-        // This ensures the timeout ALWAYS works (main thread never hangs in entity code)
-        int batchSize = Math.max(EntityThreadingConfig.minBatchSize,
-                (totalEntities + workerCount - 1) / workerCount);
+        // We use a shared atomic index so threads (including main) can steal work dynamically.
+        // This completely eliminates load imbalance and puts the main thread to work,
+        // preventing the massive latch.await() bottleneck shown in profilers.
+        final AtomicInteger currentIndex = new AtomicInteger(0);
 
-        // Count actual worker batches needed
-        int actualWorkers = 0;
-        for (int t = 0; t < workerCount; t++) {
-            if (t * batchSize >= totalEntities) break;
-            actualWorkers++;
-        }
-
-        if (actualWorkers == 0) {
-            chunkSnapshot = Collections.emptyMap();
-            return;
-        }
-
-        // Submit ALL entities to worker threads
-        CountDownLatch latch = new CountDownLatch(actualWorkers);
+        CountDownLatch latch = new CountDownLatch(workerCount);
         activeWorkerThreads.clear();
 
-        for (int t = 0; t < actualWorkers; t++) {
-            final int start = t * batchSize;
-            final int end = Math.min(start + batchSize, totalEntities);
+        // Submit to worker threads
+        for (int t = 0; t < workerCount; t++) {
             threadPool.execute(() -> {
                 Thread currentThread = Thread.currentThread();
                 activeWorkerThreads.add(currentThread);
                 IS_WORKER_THREAD.set(true);
                 currentSideIsRemote.set(isRemote);
                 try {
-                    for (int i = start; i < end; i++) {
-                        safeTick(tickArray[i].world, tickArray[i].entity);
+                    int i;
+                    while ((i = currentIndex.getAndAdd(32)) < totalEntities) {
+                        int end = Math.min(i + 32, totalEntities);
+                        for (int j = i; j < end; j++) {
+                            safeTick(tickArray[j].world, tickArray[j].entity);
+                        }
                     }
                 } finally {
                     IS_WORKER_THREAD.set(false);
@@ -300,7 +272,21 @@ public class EntityTickScheduler {
             });
         }
 
-        // Main thread ONLY waits — guaranteed to reach timeout if any worker hangs
+        IS_WORKER_THREAD.set(true);
+        currentSideIsRemote.set(isRemote);
+        try {
+            int i;
+            while ((i = currentIndex.getAndAdd(32)) < totalEntities) {
+                int end = Math.min(i + 32, totalEntities);
+                for (int j = i; j < end; j++) {
+                    safeTick(tickArray[j].world, tickArray[j].entity);
+                }
+            }
+        } finally {
+            IS_WORKER_THREAD.set(false);
+        }
+
+        // Main thread ONLY waits for workers to finish their final active batches
         try {
             if (!latch.await(WORKER_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 // Workers are stuck — dump their stack traces for diagnostics
@@ -326,7 +312,7 @@ public class EntityTickScheduler {
         }
 
         // Release chunk snapshot
-        chunkSnapshot = Collections.emptyMap();
+        chunkSnapshot = EMPTY_SNAPSHOT;
     }
 
     /**
@@ -352,8 +338,6 @@ public class EntityTickScheduler {
             }
 
             if (entity.addedToChunk || entity.forceSpawn) {
-                entity.ticksExisted++;
-
                 if (entity.isRiding()) {
                     entity.updateRidden();
                 } else {
@@ -371,8 +355,10 @@ public class EntityTickScheduler {
         }
 
         try {
-            if (!entity.getPassengers().isEmpty()) {
-                for (Entity passenger : new ArrayList<>(entity.getPassengers())) {
+            List<Entity> passengers = entity.getPassengers();
+            if (!passengers.isEmpty()) {
+                Entity[] passArray = passengers.toArray(new Entity[0]);
+                for (Entity passenger : passArray) {
                     if (!passenger.isDead && passenger.getRidingEntity() == entity) {
                         if (passenger instanceof EntityPlayer || blacklistedClasses.contains(passenger.getClass().getName())) {
                             DeferredActionQueue.enqueue(() -> safeTick(world, passenger));
@@ -429,20 +415,11 @@ public class EntityTickScheduler {
     }
 
     public static void shutdown() {
-        if (threadPool != null) {
-            threadPool.shutdown();
-            try {
-                if (!threadPool.awaitTermination(3, TimeUnit.SECONDS)) {
-                    threadPool.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                threadPool.shutdownNow();
-            }
-        }
+        if (threadPool != null) threadPool.shutdownNow();
         parallelEntities.get().clear();
         mainThreadEntities.get().clear();
         DeferredActionQueue.clear();
-        chunkSnapshot = Collections.emptyMap();
+        chunkSnapshot = EMPTY_SNAPSHOT;
     }
 
     private static class EntityTickEntry {

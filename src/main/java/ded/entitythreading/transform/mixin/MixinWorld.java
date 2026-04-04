@@ -1,11 +1,13 @@
 package ded.entitythreading.transform.mixin;
 
 import ded.entitythreading.schedule.DeferredActionQueue;
+import ded.entitythreading.schedule.DeferredArrayList;
 import ded.entitythreading.schedule.EntityTickScheduler;
 import ded.entitythreading.transform.IMixinWorld;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.SoundCategory;
 import net.minecraft.util.SoundEvent;
@@ -14,31 +16,54 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.EnumSkyBlock;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
-import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
+import org.spongepowered.asm.mixin.*;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
-/**
- * Intercepts thread-unsafe World methods called from entity worker threads.
- * Defers them to main thread via DeferredActionQueue.
- *
- * ONLY intercepts when called from a worker thread (isEntityThread()).
- * Main thread calls pass through unmodified — zero overhead.
- */
+import java.util.List;
+
 @Mixin(World.class)
 public abstract class MixinWorld implements IMixinWorld {
 
-    @Shadow
-    public abstract Chunk getChunk(int chunkX, int chunkZ);
+    @Shadow public abstract Chunk getChunk(int chunkX, int chunkZ);
+    @Shadow public abstract void updateEntity(Entity ent);
+    @Shadow public abstract boolean isChunkLoaded(int x, int z, boolean allowEmpty);
 
-    @Shadow
-    public abstract void updateEntity(Entity ent);
+    // Expose vanilla lists so we can replace them with our Thread-Safe variants
+    @Mutable @Shadow @Final public List<Entity> loadedEntityList;
+    @Mutable @Shadow @Final public List<TileEntity> tickableTileEntities;
+    @Mutable @Shadow @Final public List<TileEntity> loadedTileEntityList;
+    @Mutable @Shadow @Final public List<Entity> weatherEffects;
+    @Mutable @Shadow @Final public List<EntityPlayer> playerEntities;
 
-    @Shadow
-    public abstract boolean isChunkLoaded(int x, int z, boolean allowEmpty);
+    /**
+     * Replaces vanilla ArrayLists with DeferredArrayLists to block concurrent
+     * modification by poorly coded mods directly accessing the lists.
+     */
+    @Inject(method = "<init>", at = @At("RETURN"))
+    private void onWorldInit(CallbackInfo ci) {
+        this.loadedEntityList = new DeferredArrayList<>(this.loadedEntityList);
+        this.tickableTileEntities = new DeferredArrayList<>(this.tickableTileEntities);
+        this.loadedTileEntityList = new DeferredArrayList<>(this.loadedTileEntityList);
+        this.weatherEffects = new DeferredArrayList<>(this.weatherEffects);
+        this.playerEntities = new DeferredArrayList<>(this.playerEntities);
+    }
+
+
+    @Overwrite(remap = false)
+    public int countEntities(net.minecraft.entity.EnumCreatureType type, boolean forSpawnCount) {
+        int count = 0;
+        try {
+            for (int x = 0; x < loadedEntityList.size(); x++) {
+                if (((Entity) loadedEntityList.get(x)).isCreatureType(type, forSpawnCount)) {
+                    count++;
+                }
+            }
+        } catch (NullPointerException e) {}
+        return count;
+    }
 
     // === IMixinWorld implementations ===
 
@@ -82,9 +107,7 @@ public abstract class MixinWorld implements IMixinWorld {
             DeferredActionQueue.enqueue(() -> {
                 try {
                     ((World) (Object) this).spawnEntity(entityIn);
-                } catch (Exception e) {
-                    // "Entity is already tracked" or similar — safe to ignore
-                }
+                } catch (Exception e) { }
             });
             cir.setReturnValue(true);
         }
@@ -96,9 +119,7 @@ public abstract class MixinWorld implements IMixinWorld {
             DeferredActionQueue.enqueue(() -> {
                 try {
                     ((World) (Object) this).removeEntity(entityIn);
-                } catch (Exception e) {
-                    // Entity might already be removed — safe to ignore
-                }
+                } catch (Exception e) { }
             });
             ci.cancel();
         }
@@ -110,9 +131,7 @@ public abstract class MixinWorld implements IMixinWorld {
             DeferredActionQueue.enqueue(() -> {
                 try {
                     ((World) (Object) this).removeEntityDangerously(entityIn);
-                } catch (Exception e) {
-                    // Entity might already be removed — safe to ignore
-                }
+                } catch (Exception e) { }
             });
             ci.cancel();
         }
@@ -186,7 +205,7 @@ public abstract class MixinWorld implements IMixinWorld {
             if (cached != null) {
                 cir.setReturnValue(cached);
             } else {
-                cir.setReturnValue(new net.minecraft.world.chunk.EmptyChunk((World) (Object) this, x, z));
+                cir.setReturnValue(new Chunk((World) (Object) this, x, z));
             }
         }
     }
@@ -207,9 +226,7 @@ public abstract class MixinWorld implements IMixinWorld {
             DeferredActionQueue.enqueue(() -> {
                 try {
                     ((World) (Object) this).onEntityAdded(entityIn);
-                } catch (Exception e) {
-                    // Entity might already be tracked — safe to ignore
-                }
+                } catch (Exception e) { }
             });
             ci.cancel();
         }
@@ -221,9 +238,7 @@ public abstract class MixinWorld implements IMixinWorld {
             DeferredActionQueue.enqueue(() -> {
                 try {
                     ((World) (Object) this).onEntityRemoved(entityIn);
-                } catch (Exception e) {
-                    // Entity might already be removed — safe to ignore
-                }
+                } catch (Exception e) { }
             });
             ci.cancel();
         }

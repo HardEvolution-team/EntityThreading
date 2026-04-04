@@ -18,8 +18,24 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  */
 @Mixin(WorldServer.class)
 public abstract class MixinWorldServer {
+    // Th3_Sl1ze: Yaaay! Even more injects to try to band-aid CME! Please more, more injects!
 
-    // --- Entity thread interceptors (existing) ---
+    @Inject(method = "onEntityAdded", at = @At("HEAD"), cancellable = true)
+    private void onEntityAddedServerSync(Entity entityIn, CallbackInfo ci) {
+        if (EntityTickScheduler.isEntityThread()) {
+            DeferredActionQueue.enqueue(() -> ((WorldServer) (Object) this).onEntityAdded(entityIn));
+            ci.cancel();
+        }
+    }
+
+    @Inject(method = "onEntityRemoved", at = @At("HEAD"), cancellable = true)
+    private void onEntityRemovedServerSync(Entity entityIn, CallbackInfo ci) {
+        if (EntityTickScheduler.isEntityThread()) {
+            DeferredActionQueue.enqueue(() -> ((WorldServer) (Object) this).onEntityRemoved(entityIn));
+            ci.cancel();
+        }
+    }
+
 
     @Inject(method = "scheduleUpdate", at = @At("HEAD"), cancellable = true)
     private void onScheduleUpdate(BlockPos pos, Block blockIn, int delay, CallbackInfo ci) {

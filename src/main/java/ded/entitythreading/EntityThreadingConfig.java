@@ -55,15 +55,11 @@ public class EntityThreadingConfig {
 
     public static int getEffectiveThreadCount() {
         int cores = Runtime.getRuntime().availableProcessors();
-        switch (threadMode.toLowerCase()) {
-            case "max":
-                return Math.max(2, cores - 1);
-            case "manual":
-                return Math.max(1, Math.min(manualThreadCount, cores));
-            case "auto":
-            default:
-                return Math.max(2, Math.min(cores / 2, 4));
-        }
+        return switch (threadMode.toLowerCase()) {
+            case "max" -> Math.max(2, cores - 1);
+            case "manual" -> Math.max(1, Math.min(manualThreadCount, cores));
+            default -> Math.max(2, Math.min(cores / 2, 4));
+        };
     }
 
     @Mod.EventBusSubscriber(modid = "entity_threader")
