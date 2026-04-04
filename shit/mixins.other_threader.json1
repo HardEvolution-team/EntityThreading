@@ -1,0 +1,14 @@
+{
+  "package": "ded.otherthreading.transform.mixin",
+  "refmap": "mixins.other_threader.refmap.json",
+  "target": "@env(DEFAULT)",
+  "minVersion": "0.8",
+  "compatibilityLevel": "JAVA_8",
+  "mixins": [
+    "MixinWorldServer",
+    "MixinWorldOther",
+    "MixinWorldEffects"
+  ],
+  "client": [],
+  "server": []
+}
