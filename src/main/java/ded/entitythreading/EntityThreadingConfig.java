@@ -21,53 +21,51 @@ public class EntityThreadingConfig {
     })
     public static String threadMode = "auto";
 
-    @Config.Comment({
-            "Number of worker threads when threadMode = manual.",
-            "Recommended: 2-4 for most setups."
-    })
+    @Config.Comment("Number of worker threads when threadMode = manual.")
     @Config.RangeInt(min = 1, max = 16)
     public static int manualThreadCount = 3;
 
-    @Config.Comment({
-            "Entities to exclude from parallel ticking.",
-            "You can use full class names OR registry names.",
-            "These entities will always tick on the main thread.",
-            "EntityItem is blacklisted by default because Quark hooks it with a WeakHashMap (not thread-safe).",
-            "Examples:",
-            "  Class: \"net.minecraft.entity.boss.EntityDragon\"",
-            "  Registry Name: \"minecraft:ender_dragon\""
-    })
+    @Config.Comment("Entity classes to exclude from parallel ticking. Use full class names.")
     public static String[] blacklistedEntities = new String[] {
             "net.minecraft.entity.item.EntityItem",
-            "net.minecraft.entity.item.EntityXPOrb",
-            "net.minecraft.entity.player.EntityPlayer",
-            "net.minecraft.entity.player.EntityPlayerMP"
+            "net.minecraft.entity.item.EntityXPOrb"
     };
 
-    @Config.Comment("Enable debug logging (entity counts, thread stats per tick).")
+    @Config.Comment("Enable debug logging.")
     public static boolean debugLogging = false;
 
-    @Config.Comment("Enable asynchronous pathfinding. EXPERIMENTAL — may cause AI glitches.")
+    @Config.Comment("Enable asynchronous pathfinding. EXPERIMENTAL.")
     public static boolean asyncPathfinding = false;
 
-    @Config.Comment("Minimum number of entities to enable parallel ticking. Below this, main thread is faster.")
+    @Config.Comment("Minimum number of entities to enable parallel ticking.")
     @Config.RangeInt(min = 10, max = 1000)
     public static int minEntitiesForThreading = 100;
 
-    @Config.Comment("Minimum batch size per worker thread. Too small = thread overhead outweighs benefits.")
+    @Config.Comment("Minimum batch size per worker thread.")
     @Config.RangeInt(min = 10, max = 500)
     public static int minBatchSize = 50;
+
+    @Config.Comment("Enable entity activation range (skip ticking far entities). Huge performance boost.")
+    public static boolean entityActivationRange = true;
+
+    @Config.Comment("Activation range for hostile mobs (blocks).")
+    @Config.RangeInt(min = 8, max = 256)
+    public static int activationRangeMonsters = 32;
+
+    @Config.Comment("Activation range for passive animals (blocks).")
+    @Config.RangeInt(min = 8, max = 256)
+    public static int activationRangeAnimals = 16;
+
+    @Config.Comment("Activation range for misc entities (blocks).")
+    @Config.RangeInt(min = 8, max = 256)
+    public static int activationRangeMisc = 16;
 
     public static int getEffectiveThreadCount() {
         int cores = Runtime.getRuntime().availableProcessors();
         switch (threadMode.toLowerCase()) {
-            case "max":
-                return Math.max(2, cores - 1);
-            case "manual":
-                return Math.max(1, Math.min(manualThreadCount, cores));
-            case "auto":
-            default:
-                return Math.max(2, Math.min(cores / 2, 4));
+            case "max": return Math.max(2, cores - 1);
+            case "manual": return Math.max(1, Math.min(manualThreadCount, cores));
+            default: return Math.max(2, Math.min(cores / 2, 4));
         }
     }
 

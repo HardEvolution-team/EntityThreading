@@ -41,4 +41,5 @@ dependencies {
     implementation 'org.ow2.asm:asm:5.2'
     implementation 'org.ow2.asm:asm-tree:5.2'
     implementation 'org.ow2.asm:asm-util:5.2'
+  //  implementation "dev.redstudio:Red-Core-MC:$redCoreVersion"
 }

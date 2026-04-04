@@ -5,12 +5,6 @@ import org.objectweb.asm.Opcodes;
 
 import static org.objectweb.asm.Opcodes.ASM5;
 
-/**
- * ASM MethodVisitor that patches World.updateEntities():
- * 1. Redirects World.updateEntity(Entity) →
- * EntityTickScheduler.queueEntity(World, Entity)
- * 2. Injects EntityTickScheduler.waitForFinish() before every RETURN opcode
- */
 public class WorldMethodTransformer extends MethodVisitor {
 
     WorldMethodTransformer(MethodVisitor methodVisitor) {

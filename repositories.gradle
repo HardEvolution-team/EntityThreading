@@ -9,4 +9,8 @@ repositories {
         name = "Mojang"
         url = "https://libraries.minecraft.net/"
     }
+    maven {
+        name = "Red Studio Maven"
+        url = "https://maven.redstudio.dev/"
+    }
 }

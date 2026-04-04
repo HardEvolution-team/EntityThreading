@@ -1,4 +1,3 @@
-
 package ded.entitythreading;
 
 import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin;
@@ -11,10 +10,7 @@ public class ThreaderLoadingPlugin implements IFMLLoadingPlugin {
 
     @Override
     public String[] getASMTransformerClass() {
-        System.out.println("[EntityThreading] Registering ASM transformers...");
-        return new String[] {
-                "ded.entitythreading.transform.WorldClassTransformer"
-        };
+        return new String[] { "ded.entitythreading.transform.WorldClassTransformer" };
     }
 
     @Override
@@ -30,7 +26,6 @@ public class ThreaderLoadingPlugin implements IFMLLoadingPlugin {
 
     @Override
     public void injectData(Map<String, Object> data) {
-        System.out.println("[EntityThreading] Registering mixin configs...");
         Mixins.addConfiguration("mixins.entity_threader.json");
         System.out.println("[EntityThreading] Parallel entity ticking loaded.");
     }

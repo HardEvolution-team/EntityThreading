@@ -1,38 +1,59 @@
 package ded.entitythreading.schedule;
 
+import java.util.ArrayList;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
-/**
- * Lock-free deferred action queue for thread-unsafe world mutations.
- * Separated by Client vs Server to prevent cross-side interference.
- *
- * All debug/stats overhead has been removed — this is a hot path.
- */
 public final class DeferredActionQueue {
 
-    private static final ConcurrentLinkedQueue<Runnable> CLIENT_QUEUE = new ConcurrentLinkedQueue<>();
-    private static final ConcurrentLinkedQueue<Runnable> SERVER_QUEUE = new ConcurrentLinkedQueue<>();
+    private static final ConcurrentLinkedQueue<Runnable> GLOBAL_SERVER = new ConcurrentLinkedQueue<>();
+    private static final ConcurrentLinkedQueue<Runnable> GLOBAL_CLIENT = new ConcurrentLinkedQueue<>();
+    private static final ConcurrentLinkedQueue<ArrayList<Runnable>> WORKER_BUFFERS = new ConcurrentLinkedQueue<>();
 
     public static void enqueue(Runnable action) {
-        enqueue(EntityTickScheduler.isCurrentThreadRemote(), action);
-    }
-
-    public static void enqueue(boolean isRemote, Runnable action) {
-        if (isRemote) {
-            CLIENT_QUEUE.add(action);
+        Thread t = Thread.currentThread();
+        if (t instanceof EntityWorkerThread) {
+            ((EntityWorkerThread) t).deferredBuffer.add(action);
         } else {
-            SERVER_QUEUE.add(action);
+            enqueueGlobal(EntityTickScheduler.isCurrentThreadRemote(), action);
         }
     }
 
-    /**
-     * Replay all queued actions for the given side. Must be called from the main thread.
-     * @return number of actions replayed
-     */
+    public static void enqueue(boolean isRemote, Runnable action) {
+        Thread t = Thread.currentThread();
+        if (t instanceof EntityWorkerThread) {
+            ((EntityWorkerThread) t).deferredBuffer.add(action);
+        } else {
+            enqueueGlobal(isRemote, action);
+        }
+    }
+
+    private static void enqueueGlobal(boolean isRemote, Runnable action) {
+        (isRemote ? GLOBAL_CLIENT : GLOBAL_SERVER).add(action);
+    }
+
+    static void submitWorkerBuffer(ArrayList<Runnable> buffer) {
+        if (!buffer.isEmpty()) {
+            WORKER_BUFFERS.add(buffer);
+        }
+    }
+
     public static int replayAll(boolean isRemote) {
         int count = 0;
+
+        ArrayList<Runnable> workerBuf;
+        while ((workerBuf = WORKER_BUFFERS.poll()) != null) {
+            for (int i = 0, s = workerBuf.size(); i < s; i++) {
+                try {
+                    workerBuf.get(i).run();
+                    count++;
+                } catch (Exception e) {
+                    System.err.println("[EntityThreading] Deferred action error: " + e.getMessage());
+                }
+            }
+        }
+
         Runnable action;
-        ConcurrentLinkedQueue<Runnable> queue = isRemote ? CLIENT_QUEUE : SERVER_QUEUE;
+        ConcurrentLinkedQueue<Runnable> queue = isRemote ? GLOBAL_CLIENT : GLOBAL_SERVER;
         while ((action = queue.poll()) != null) {
             try {
                 action.run();
@@ -41,11 +62,13 @@ public final class DeferredActionQueue {
                 System.err.println("[EntityThreading] Deferred action error: " + e.getMessage());
             }
         }
+
         return count;
     }
 
     public static void clear() {
-        CLIENT_QUEUE.clear();
-        SERVER_QUEUE.clear();
+        GLOBAL_CLIENT.clear();
+        GLOBAL_SERVER.clear();
+        WORKER_BUFFERS.clear();
     }
 }

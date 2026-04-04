@@ -5,10 +5,6 @@ import org.objectweb.asm.MethodVisitor;
 
 import static org.objectweb.asm.Opcodes.ASM5;
 
-/**
- * ASM ClassVisitor that intercepts the World.updateEntities() method.
- * Matches on SRG name "updateEntities" and obfuscated fallbacks.
- */
 public class WorldClassVisitor extends ClassVisitor {
     public WorldClassVisitor(ClassVisitor classVisitor) {
         super(ASM5, classVisitor);

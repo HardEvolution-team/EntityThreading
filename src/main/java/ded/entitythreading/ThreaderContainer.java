@@ -1,4 +1,3 @@
-
 package ded.entitythreading;
 
 import com.google.common.eventbus.EventBus;
@@ -12,7 +11,7 @@ public class ThreaderContainer extends DummyModContainer {
         ModMetadata metadata = getMetadata();
         metadata.modId = "entity_threader";
         metadata.name = "Mob_Entity_Threader";
-        metadata.description = "Adds hooks and scheduling to thread groups of mob entities";
+        metadata.description = "Parallel entity ticking for Minecraft 1.12.2";
         metadata.version = "0.1";
     }
 
