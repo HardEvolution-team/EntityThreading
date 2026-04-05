@@ -1,9 +1,10 @@
 package ded.entitythreading.schedule;
 
+import ded.entitythreading.mixin.PathFinderAccessor;
+import net.minecraft.entity.EntityLiving;
 import net.minecraft.pathfinding.Path;
 import net.minecraft.pathfinding.PathFinder;
 import net.minecraft.world.IBlockAccess;
-import net.minecraft.entity.EntityLiving;
 
 import java.util.concurrent.*;
 
@@ -37,7 +38,7 @@ public final class AsyncPathProcessor {
 
         CompletableFuture<Path> future = CompletableFuture.supplyAsync(() -> {
             try {
-                return ((ded.entitythreading.transform.mixin.accessor.PathFinderAccessor) pathFinder)
+                return ((PathFinderAccessor) pathFinder)
                         .invokeFindPath(worldCache, entity, x, y, z, range);
             } catch (Exception e) {
                 return null;

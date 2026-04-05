@@ -1,7 +1,9 @@
 package ded.entitythreading.schedule;
 
-import ded.entitythreading.EntityThreadingConfig;
-import ded.entitythreading.transform.IMixinWorld;
+import ded.entitythreading.EntityThreadingMod;
+import ded.entitythreading.config.EntityThreadingConfig;
+import ded.entitythreading.interfaces.IEntityActivation;
+import ded.entitythreading.interfaces.IMixinWorld;
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.EntityPlayer;
@@ -9,41 +11,37 @@ import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.World;
 import net.minecraft.world.chunk.Chunk;
-import net.minecraft.world.chunk.EmptyChunk;
 import net.minecraft.world.gen.ChunkProviderServer;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class EntityTickScheduler {
 
-    private static volatile ExecutorService threadPool;
-    private static int currentThreadCount = 0;
-
     private static final Set<String> blacklistedClasses = ConcurrentHashMap.newKeySet();
     private static final Set<String> blacklistedModPrefixes = ConcurrentHashMap.newKeySet();
     private static final Set<String> blacklistedModIds = ConcurrentHashMap.newKeySet();
     private static final Set<String> loggedErrorClasses = ConcurrentHashMap.newKeySet();
-
     private static final ThreadLocal<ArrayList<Entity>> parallelEntities =
             ThreadLocal.withInitial(() -> new ArrayList<>(4096));
     private static final ThreadLocal<ArrayList<Entity>> mainThreadEntities =
             ThreadLocal.withInitial(() -> new ArrayList<>(256));
     private static final ThreadLocal<World> currentTickWorld = new ThreadLocal<>();
-
     private static final ThreadLocal<Boolean> mainThreadWorkerFlag = ThreadLocal.withInitial(() -> false);
     private static final ThreadLocal<Boolean> mainThreadRemoteFlag = ThreadLocal.withInitial(() -> false);
-
     private static final Long2ObjectOpenHashMap<Chunk> EMPTY_SNAPSHOT = new Long2ObjectOpenHashMap<>(0);
-    private static volatile Long2ObjectOpenHashMap<Chunk> chunkSnapshot = EMPTY_SNAPSHOT;
-
     private static final CopyOnWriteArrayList<Thread> activeWorkerThreads = new CopyOnWriteArrayList<>();
-
     private static final long WORKER_TIMEOUT_MS = 3_000;
-    private static volatile long cooldownUntil = 0;
     private static final long COOLDOWN_DURATION_MS = 30_000;
     private static final int BATCH_SIZE = 64;
+    private static volatile ExecutorService threadPool;
+    private static int currentThreadCount = 0;
+    private static volatile Long2ObjectOpenHashMap<Chunk> chunkSnapshot = EMPTY_SNAPSHOT;
+    private static volatile long cooldownUntil = 0;
 
     static {
         initThreadPool();
@@ -148,22 +146,22 @@ public class EntityTickScheduler {
 
     private static void tickMainThreadEntities(World world, ArrayList<Entity> entries) {
         if (entries.isEmpty()) return;
-        for (int i = 0, s = entries.size(); i < s; i++) {
+        for (Entity entry : entries) {
             try {
-                world.updateEntity(entries.get(i));
+                world.updateEntity(entry);
             } catch (Exception e) {
-                logError(entries.get(i), e);
+                logError(entry, e);
             }
         }
         entries.clear();
     }
 
     private static void tickAllOnMainThread(World world, ArrayList<Entity> entries) {
-        for (int i = 0, s = entries.size(); i < s; i++) {
+        for (Entity entry : entries) {
             try {
-                world.updateEntity(entries.get(i));
+                world.updateEntity(entry);
             } catch (Exception e) {
-                logError(entries.get(i), e);
+                logError(entry, e);
             }
         }
         entries.clear();
@@ -187,8 +185,7 @@ public class EntityTickScheduler {
     public static Chunk getChunkFromSnapshot(int x, int z) {
         long key = ChunkPos.asLong(x, z);
         Thread t = Thread.currentThread();
-        if (t instanceof EntityWorkerThread) {
-            EntityWorkerThread ewt = (EntityWorkerThread) t;
+        if (t instanceof EntityWorkerThread ewt) {
             if (ewt.lastChunkKey == key && ewt.lastChunk != null) {
                 return (Chunk) ewt.lastChunk;
             }
@@ -256,16 +253,16 @@ public class EntityTickScheduler {
         try {
             if (!latch.await(WORKER_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 int stuckCount = (int) latch.getCount();
-                System.err.println("[EntityThreading] WARNING: " + stuckCount + " worker(s) stuck after " + WORKER_TIMEOUT_MS + "ms!");
+                EntityThreadingMod.LOGGER.warn("{} worker(s) stuck after " + WORKER_TIMEOUT_MS + "ms!", stuckCount);
                 for (Thread worker : activeWorkerThreads) {
-                    System.err.println("[EntityThreading] Stuck thread: " + worker.getName());
+                    EntityThreadingMod.LOGGER.error("Stuck thread: {}", worker.getName());
                     for (StackTraceElement ste : worker.getStackTrace()) {
-                        System.err.println("    at " + ste);
+                        EntityThreadingMod.LOGGER.error("at {}", ste);
                     }
                 }
                 activeWorkerThreads.clear();
                 cooldownUntil = System.currentTimeMillis() + COOLDOWN_DURATION_MS;
-                System.err.println("[EntityThreading] Parallel ticking disabled for " + (COOLDOWN_DURATION_MS / 1000) + "s cooldown.");
+                EntityThreadingMod.LOGGER.error("Parallel ticking disabled for " + (COOLDOWN_DURATION_MS / 1000) + "s cooldown.");
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -310,7 +307,7 @@ public class EntityTickScheduler {
             }
         } catch (Throwable t) {
             if (loggedErrorClasses.add(entity.getClass().getName())) {
-                System.err.println("[EntityThreading] " + entity.getClass().getSimpleName() + " tick error: " + t.getMessage());
+                EntityThreadingMod.LOGGER.error("{} tick error: {}", entity.getClass().getSimpleName(), t.getMessage());
                 t.printStackTrace();
             }
             return;
@@ -346,13 +343,19 @@ public class EntityTickScheduler {
             for (Entity passenger : passArray) {
                 if (passenger.isDead || passenger.getRidingEntity() != entity) {
                     DeferredActionQueue.enqueue(() -> {
-                        try { passenger.dismountRidingEntity(); } catch (Exception ignored) {}
+                        try {
+                            passenger.dismountRidingEntity();
+                        } catch (Exception ignored) {
+                        }
                     });
                     continue;
                 }
                 if (passenger instanceof EntityPlayer || isBlacklisted(passenger)) {
                     DeferredActionQueue.enqueue(() -> {
-                        try { world.updateEntity(passenger); } catch (Exception ignored) {}
+                        try {
+                            world.updateEntity(passenger);
+                        } catch (Exception ignored) {
+                        }
                     });
                 } else {
                     safeTick(world, passenger);
@@ -367,7 +370,7 @@ public class EntityTickScheduler {
 
     private static void logError(Entity entity, Exception e) {
         if (loggedErrorClasses.add(entity.getClass().getName())) {
-            System.err.println("[EntityThreading] Tick error: " + entity.getClass().getSimpleName() + ": " + e.getMessage());
+            EntityThreadingMod.LOGGER.error("Tick error: {}: {}", entity.getClass().getSimpleName(), e.getMessage());
         }
     }
 

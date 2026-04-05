@@ -1,16 +1,25 @@
 package ded.entitythreading;
 
+import ded.entitythreading.schedule.EntityTickScheduler;
+import net.minecraftforge.common.config.Config;
+import net.minecraftforge.common.config.ConfigManager;
+import net.minecraftforge.fml.client.event.ConfigChangedEvent;
 import net.minecraftforge.fml.common.Mod;
-import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
+import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
-@Mod(modid = "entity_threader", name = "EntityThreading", version = Tags.VERSION, acceptableRemoteVersions = "*")
+@Mod(modid = Reference.MOD_ID, name = Reference.MOD_NAME, version = Reference.VERSION)
+@Mod.EventBusSubscriber
 public class EntityThreadingMod {
 
-    @Mod.Instance("entity_threader")
-    public static EntityThreadingMod instance;
+    public static final Logger LOGGER = LogManager.getLogger(Reference.MOD_NAME);
 
-    @Mod.EventHandler
-    public void preInit(FMLPreInitializationEvent event) {
-        System.out.println("[EntityThreading] Mod initialized.");
+    @SubscribeEvent
+    public static void onConfigChanged(ConfigChangedEvent.OnConfigChangedEvent event) {
+        if (event.getModID().equals(Reference.MOD_ID)) {
+            ConfigManager.sync(Reference.MOD_ID, Config.Type.INSTANCE);
+            EntityTickScheduler.reinitialize();
+        }
     }
 }

@@ -16,19 +16,6 @@ public final class EntityWorkerThread extends Thread {
         setPriority(Thread.NORM_PRIORITY - 1);
     }
 
-    void resetForTask(boolean remote) {
-        this.isWorker = true;
-        this.isRemote = remote;
-        this.lastChunkKey = Long.MIN_VALUE;
-        this.lastChunk = null;
-        this.deferredBuffer.clear();
-    }
-
-    void finishTask() {
-        this.isWorker = false;
-        this.lastChunk = null;
-    }
-
     public static boolean isCurrentThreadWorker() {
         return Thread.currentThread() instanceof EntityWorkerThread
                 && ((EntityWorkerThread) Thread.currentThread()).isWorker;
@@ -40,5 +27,18 @@ public final class EntityWorkerThread extends Thread {
             return ((EntityWorkerThread) t).isRemote;
         }
         return false;
+    }
+
+    void resetForTask(boolean remote) {
+        this.isWorker = true;
+        this.isRemote = remote;
+        this.lastChunkKey = Long.MIN_VALUE;
+        this.lastChunk = null;
+        this.deferredBuffer.clear();
+    }
+
+    void finishTask() {
+        this.isWorker = false;
+        this.lastChunk = null;
     }
 }

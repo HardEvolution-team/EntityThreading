@@ -1,8 +1,8 @@
 package ded.entitythreading.schedule;
 
-import ded.entitythreading.EntityThreadingConfig;
+import ded.entitythreading.config.EntityThreadingConfig;
+import ded.entitythreading.interfaces.IEntityActivation;
 import net.minecraft.entity.Entity;
-import net.minecraft.entity.EntityLiving;
 import net.minecraft.entity.boss.EntityDragon;
 import net.minecraft.entity.boss.EntityWither;
 import net.minecraft.entity.item.EntityFallingBlock;
@@ -30,11 +30,10 @@ public final class EntityActivationRange {
         int animalRangeSq = EntityThreadingConfig.activationRangeAnimals * EntityThreadingConfig.activationRangeAnimals;
         int miscRangeSq = EntityThreadingConfig.activationRangeMisc * EntityThreadingConfig.activationRangeMisc;
 
-        int size = entities.size();
-        for (int i = 0; i < size; i++) {
+        for (Entity value : entities) {
             Entity entity;
             try {
-                entity = entities.get(i);
+                entity = value;
             } catch (Exception e) {
                 continue;
             }
@@ -55,10 +54,10 @@ public final class EntityActivationRange {
             }
 
             boolean active = false;
-            for (int p = 0, ps = players.size(); p < ps; p++) {
+            for (EntityPlayer entityPlayer : players) {
                 EntityPlayer player;
                 try {
-                    player = players.get(p);
+                    player = entityPlayer;
                 } catch (Exception e) {
                     continue;
                 }
@@ -86,7 +85,6 @@ public final class EntityActivationRange {
         if (entity instanceof EntityDragon) return true;
         if (entity instanceof EntityWither) return true;
         if (entity.isBeingRidden()) return true;
-        if (entity.ticksExisted < 20) return true;
-        return false;
+        return entity.ticksExisted < 20;
     }
 }

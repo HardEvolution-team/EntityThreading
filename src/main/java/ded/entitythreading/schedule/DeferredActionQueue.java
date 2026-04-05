@@ -1,5 +1,7 @@
 package ded.entitythreading.schedule;
 
+import ded.entitythreading.EntityThreadingMod;
+
 import java.util.ArrayList;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -42,12 +44,12 @@ public final class DeferredActionQueue {
 
         ArrayList<Runnable> workerBuf;
         while ((workerBuf = WORKER_BUFFERS.poll()) != null) {
-            for (int i = 0, s = workerBuf.size(); i < s; i++) {
+            for (Runnable runnable : workerBuf) {
                 try {
-                    workerBuf.get(i).run();
+                    runnable.run();
                     count++;
                 } catch (Exception e) {
-                    System.err.println("[EntityThreading] Deferred action error: " + e.getMessage());
+                    EntityThreadingMod.LOGGER.error("Deferred action error: {}", e.getMessage());
                 }
             }
         }
@@ -59,7 +61,7 @@ public final class DeferredActionQueue {
                 action.run();
                 count++;
             } catch (Exception e) {
-                System.err.println("[EntityThreading] Deferred action error: " + e.getMessage());
+                EntityThreadingMod.LOGGER.error("Deferred action error: {}", e.getMessage());
             }
         }
 
