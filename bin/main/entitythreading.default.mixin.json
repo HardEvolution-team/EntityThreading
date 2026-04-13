@@ -1,0 +1,23 @@
+{
+  "required": true,
+  "package": "ded.entitythreading.mixin",
+  "compatibilityLevel": "JAVA_8",
+  "target": "@env(DEFAULT)",
+  "client": [],
+  "mixins": [
+    "ASMEventHandlerMixin",
+    "ClassInheritanceMultiMapMixin",
+    "EntityMixin",
+    "MapStorageMixin",
+    "PathNavigateMixin",
+    "VillageMixin",
+    "VillageCollectionMixin",
+    "WorldMixin",
+    "WorldServerMixin",
+    "PathFinderAccessor",
+    "MixinRenderGlobal"
+  ],
+  "server": [],
+  "setSourceFile": true,
+  "minVersion": "0.8.7"
+}

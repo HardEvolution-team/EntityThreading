@@ -11,7 +11,9 @@ import javax.annotation.Nullable;
 
 @Mixin(PathFinder.class)
 public interface PathFinderAccessor {
+
     @Nullable
     @Invoker("findPath")
-    Path invokeFindPath(IBlockAccess worldIn, EntityLiving entityIn, double x, double y, double z, float distance);
+    Path invokeFindPath(IBlockAccess worldIn, EntityLiving entityIn,
+                        double x, double y, double z, float distance);
 }

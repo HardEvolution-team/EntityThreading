@@ -15,8 +15,9 @@ public abstract class VillageCollectionMixin {
     @Inject(method = "addToVillagerPositionList", at = @At("HEAD"), cancellable = true)
     private void onAddToVillagerPositionList(BlockPos pos, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
-            BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((VillageCollection) (Object) this).addToVillagerPositionList(p));
+            BlockPos immutablePos = pos.toImmutable();
+            VillageCollection self = (VillageCollection) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.addToVillagerPositionList(immutablePos));
             ci.cancel();
         }
     }

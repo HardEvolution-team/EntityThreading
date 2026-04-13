@@ -5,27 +5,64 @@ import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 
-import static org.objectweb.asm.Opcodes.ASM5;
+import java.util.Set;
 
-public class WorldVisitor extends ClassVisitor {
+import static org.objectweb.asm.Opcodes.ASM9;
+
+/**
+ * Visits World class to find and patch {@code updateEntities()}.
+ * <p>
+ * FIX: Upgraded from ASM5 to ASM9 for Java 25 compatibility.
+ * FIX: Extracted magic strings into constants.
+ */
+public final class WorldVisitor extends ClassVisitor {
+
+    private static final Set<String> UPDATE_ENTITIES_NAMES = Set.of(
+            "updateEntities", "func_72939_s", "k"
+    );
+    private static final String UPDATE_ENTITIES_DESC = "()V";
+
     public WorldVisitor(ClassVisitor classVisitor) {
-        super(ASM5, classVisitor);
+        super(ASM9, classVisitor);
     }
 
     @Override
     public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
-        MethodVisitor visitor = cv.visitMethod(access, name, desc, signature, exceptions);
-        if (desc.equals("()V") && (name.equals("updateEntities") || name.equals("func_72939_s") || name.equals("k"))) {
+        MethodVisitor visitor = super.visitMethod(access, name, desc, signature, exceptions);
+        if (UPDATE_ENTITIES_DESC.equals(desc) && UPDATE_ENTITIES_NAMES.contains(name)) {
             EntityThreadingMod.LOGGER.info("Found updateEntities() (name={}), patching...", name);
-            return new WorldMethodVisitor(visitor);
+            return new UpdateEntitiesMethodVisitor(visitor);
         }
         return visitor;
     }
 
-    static class WorldMethodVisitor extends MethodVisitor {
+    /**
+     * Rewrites individual {@code World.updateEntity(Entity)} calls to
+     * {@code EntityTickScheduler.queueEntity(World, Entity)} and inserts
+     * a {@code waitForFinish()} call before every RETURN.
+     */
+    private static final class UpdateEntitiesMethodVisitor extends MethodVisitor {
 
-        WorldMethodVisitor(MethodVisitor methodVisitor) {
-            super(ASM5, methodVisitor);
+        private static final String SCHEDULER_OWNER = "ded/entitythreading/schedule/EntityTickScheduler";
+
+        private static final String QUEUE_ENTITY_NAME = "queueEntity";
+        private static final String QUEUE_ENTITY_DESC = "(Lnet/minecraft/world/World;Lnet/minecraft/entity/Entity;)V";
+
+        private static final String WAIT_NAME = "waitForFinish";
+        private static final String WAIT_DESC = "()V";
+
+        // Deobfuscated
+        private static final String WORLD_INTERNAL = "net/minecraft/world/World";
+        private static final Set<String> UPDATE_ENTITY_NAMES_DEOBF = Set.of("updateEntity", "func_72870_g");
+        private static final String UPDATE_ENTITY_DESC_DEOBF = "(Lnet/minecraft/entity/Entity;)V";
+
+        // Obfuscated (notch names for 1.12.2)
+        private static final String WORLD_OBF = "amu";
+        private static final String UPDATE_ENTITY_NAME_OBF = "h";
+        private static final String UPDATE_ENTITY_DESC_OBF = "(Lvg;)V";
+
+        UpdateEntitiesMethodVisitor(MethodVisitor methodVisitor) {
+            super(ASM9, methodVisitor);
         }
 
         @Override
@@ -33,10 +70,11 @@ public class WorldVisitor extends ClassVisitor {
             if (opcode == Opcodes.INVOKEVIRTUAL && isUpdateEntityCall(owner, name, desc)) {
                 super.visitMethodInsn(
                         Opcodes.INVOKESTATIC,
-                        "ded/entitythreading/schedule/EntityTickScheduler",
-                        "queueEntity",
-                        "(Lnet/minecraft/world/World;Lnet/minecraft/entity/Entity;)V",
-                        false);
+                        SCHEDULER_OWNER,
+                        QUEUE_ENTITY_NAME,
+                        QUEUE_ENTITY_DESC,
+                        false
+                );
                 return;
             }
             super.visitMethodInsn(opcode, owner, name, desc, itf);
@@ -47,22 +85,24 @@ public class WorldVisitor extends ClassVisitor {
             if (opcode == Opcodes.RETURN) {
                 super.visitMethodInsn(
                         Opcodes.INVOKESTATIC,
-                        "ded/entitythreading/schedule/EntityTickScheduler",
-                        "waitForFinish",
-                        "()V",
-                        false);
+                        SCHEDULER_OWNER,
+                        WAIT_NAME,
+                        WAIT_DESC,
+                        false
+                );
             }
             super.visitInsn(opcode);
         }
 
-        private boolean isUpdateEntityCall(String owner, String name, String desc) {
-            boolean deobf = owner.equals("net/minecraft/world/World")
-                    && (name.equals("updateEntity") || name.equals("func_72870_g"))
-                    && desc.equals("(Lnet/minecraft/entity/Entity;)V");
-            boolean obf = owner.equals("amu")
-                    && name.equals("h")
-                    && desc.equals("(Lvg;)V");
-            return deobf || obf;
+        private static boolean isUpdateEntityCall(String owner, String name, String desc) {
+            if (WORLD_INTERNAL.equals(owner)
+                    && UPDATE_ENTITY_NAMES_DEOBF.contains(name)
+                    && UPDATE_ENTITY_DESC_DEOBF.equals(desc)) {
+                return true;
+            }
+            return WORLD_OBF.equals(owner)
+                    && UPDATE_ENTITY_NAME_OBF.equals(name)
+                    && UPDATE_ENTITY_DESC_OBF.equals(desc);
         }
     }
 }

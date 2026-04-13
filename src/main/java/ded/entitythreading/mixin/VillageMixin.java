@@ -11,12 +11,17 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(Village.class)
-public class VillageMixin {
+public abstract class VillageMixin {
+
+    private Village self() {
+        return (Village) (Object) this;
+    }
 
     @Inject(method = "addOrRenewAgressor", at = @At("HEAD"), cancellable = true)
     private void onAddOrRenewAgressor(EntityLivingBase entitylivingbaseIn, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> ((Village) (Object) this).addOrRenewAgressor(entitylivingbaseIn));
+            Village village = self();
+            DeferredActionQueue.enqueue(() -> village.addOrRenewAgressor(entitylivingbaseIn));
             ci.cancel();
         }
     }
@@ -24,7 +29,8 @@ public class VillageMixin {
     @Inject(method = "endMatingSeason", at = @At("HEAD"), cancellable = true)
     private void onEndMatingSeason(CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> ((Village) (Object) this).endMatingSeason());
+            Village village = self();
+            DeferredActionQueue.enqueue(village::endMatingSeason);
             ci.cancel();
         }
     }
@@ -32,15 +38,18 @@ public class VillageMixin {
     @Inject(method = "setDefaultPlayerReputation", at = @At("HEAD"), cancellable = true)
     private void onSetDefaultPlayerReputation(int defaultReputation, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> ((Village) (Object) this).setDefaultPlayerReputation(defaultReputation));
+            Village village = self();
+            DeferredActionQueue.enqueue(() -> village.setDefaultPlayerReputation(defaultReputation));
             ci.cancel();
         }
     }
 
     @Inject(method = "modifyPlayerReputation", at = @At("HEAD"), cancellable = true)
-    private void onModifyPlayerReputation(String playerName, int reputation, CallbackInfoReturnable<Integer> cir) {
+    private void onModifyPlayerReputation(String playerName, int reputation,
+                                          CallbackInfoReturnable<Integer> cir) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> ((Village) (Object) this).modifyPlayerReputation(playerName, reputation));
+            Village village = self();
+            DeferredActionQueue.enqueue(() -> village.modifyPlayerReputation(playerName, reputation));
             cir.setReturnValue(0);
         }
     }

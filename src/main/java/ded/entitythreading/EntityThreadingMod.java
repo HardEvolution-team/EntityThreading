@@ -11,15 +11,16 @@ import org.apache.logging.log4j.Logger;
 
 @Mod(modid = Reference.MOD_ID, name = Reference.MOD_NAME, version = Reference.VERSION)
 @Mod.EventBusSubscriber
-public class EntityThreadingMod {
+public final class EntityThreadingMod {
 
     public static final Logger LOGGER = LogManager.getLogger(Reference.MOD_NAME);
 
     @SubscribeEvent
     public static void onConfigChanged(ConfigChangedEvent.OnConfigChangedEvent event) {
-        if (event.getModID().equals(Reference.MOD_ID)) {
+        if (Reference.MOD_ID.equals(event.getModID())) {
             ConfigManager.sync(Reference.MOD_ID, Config.Type.INSTANCE);
             EntityTickScheduler.reinitialize();
+            LOGGER.info("Configuration reloaded, thread pool reinitialized.");
         }
     }
 }

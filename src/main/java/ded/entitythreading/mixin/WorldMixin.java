@@ -8,6 +8,7 @@ import ded.entitythreading.schedule.ThreadSafeRandom;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.EnumCreatureType;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.tileentity.TileEntity;
 import net.minecraft.util.SoundCategory;
@@ -31,39 +32,16 @@ import java.util.Random;
 @Mixin(World.class)
 public abstract class WorldMixin implements IMixinWorld {
 
-    @Mutable
-    @Shadow
-    @Final
-    public List<Entity> loadedEntityList;
-    @Mutable
-    @Shadow
-    @Final
-    public List<TileEntity> tickableTileEntities;
-    @Mutable
-    @Shadow
-    @Final
-    public List<TileEntity> loadedTileEntityList;
-    @Mutable
-    @Shadow
-    @Final
-    public List<Entity> weatherEffects;
-    @Mutable
-    @Shadow
-    @Final
-    public List<EntityPlayer> playerEntities;
-    @Final
-    @Mutable
-    @Shadow
-    public Random rand;
+    @Mutable @Shadow @Final public List<Entity> loadedEntityList;
+    @Mutable @Shadow @Final public List<TileEntity> tickableTileEntities;
+    @Mutable @Shadow @Final public List<TileEntity> loadedTileEntityList;
+    @Mutable @Shadow @Final public List<Entity> weatherEffects;
+    @Mutable @Shadow @Final public List<EntityPlayer> playerEntities;
+    @Mutable @Shadow @Final public Random rand;
 
-    @Shadow
-    public abstract Chunk getChunk(int chunkX, int chunkZ);
-
-    @Shadow
-    public abstract void updateEntity(Entity ent);
-
-    @Shadow
-    protected abstract boolean isChunkLoaded(int x, int z, boolean allowEmpty);
+    @Shadow public abstract Chunk getChunk(int chunkX, int chunkZ);
+    @Shadow public abstract void updateEntity(Entity ent);
+    @Shadow protected abstract boolean isChunkLoaded(int x, int z, boolean allowEmpty);
 
     @Inject(method = "<init>", at = @At("RETURN"))
     private void onWorldInit(CallbackInfo ci) {
@@ -76,36 +54,49 @@ public abstract class WorldMixin implements IMixinWorld {
     }
 
     /**
-     * @author
-     * @reason
+     * Thread-safe entity counting that tolerates concurrent list modifications.
+     *
+     * @author EntityThreading
+     * @reason Prevent ConcurrentModificationException during parallel entity ticking
      */
     @Overwrite(remap = false)
-    public int countEntities(net.minecraft.entity.EnumCreatureType type, boolean forSpawnCount) {
+    public int countEntities(EnumCreatureType type, boolean forSpawnCount) {
         int count = 0;
-        try {
-            List<Entity> list = loadedEntityList;
-            for (Entity e : list) {
-                if (e != null && e.isCreatureType(type, forSpawnCount)) count++;
+        List<Entity> entities = this.loadedEntityList;
+        for (int i = 0, size = entities.size(); i < size; i++) {
+            try {
+                Entity entity = entities.get(i);
+                if (entity != null && entity.isCreatureType(type, forSpawnCount)) {
+                    count++;
+                }
+            } catch (IndexOutOfBoundsException ignored) {
+                // List was concurrently modified — stop counting
+                break;
             }
-        } catch (Exception ignored) {
         }
         return count;
     }
 
     @Override
     public void entitythreading$updateChunkPos(Entity entity) {
-        int i = MathHelper.floor(entity.posX / 16.0D);
-        int j = MathHelper.floor(entity.posY / 16.0D);
-        int k = MathHelper.floor(entity.posZ / 16.0D);
+        int newCX = MathHelper.floor(entity.posX / 16.0);
+        int newCY = MathHelper.floor(entity.posY / 16.0);
+        int newCZ = MathHelper.floor(entity.posZ / 16.0);
 
-        if (!entity.addedToChunk || entity.chunkCoordX != i || entity.chunkCoordY != j || entity.chunkCoordZ != k) {
+        if (!entity.addedToChunk
+                || entity.chunkCoordX != newCX
+                || entity.chunkCoordY != newCY
+                || entity.chunkCoordZ != newCZ) {
+
             if (entity.addedToChunk && this.isChunkLoaded(entity.chunkCoordX, entity.chunkCoordZ, true)) {
-                this.getChunk(entity.chunkCoordX, entity.chunkCoordZ).removeEntityAtIndex(entity, entity.chunkCoordY);
+                this.getChunk(entity.chunkCoordX, entity.chunkCoordZ)
+                        .removeEntityAtIndex(entity, entity.chunkCoordY);
             }
-            if (!entity.setPositionNonDirty() && !this.isChunkLoaded(i, k, true)) {
+
+            if (!entity.setPositionNonDirty() && !this.isChunkLoaded(newCX, newCZ, true)) {
                 entity.addedToChunk = false;
             } else {
-                this.getChunk(i, k).addEntity(entity);
+                this.getChunk(newCX, newCZ).addEntity(entity);
             }
         }
     }
@@ -115,11 +106,16 @@ public abstract class WorldMixin implements IMixinWorld {
         this.updateEntity(entity);
     }
 
-    @Inject(method = "setBlockState(Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/block/state/IBlockState;I)Z", at = @At("HEAD"), cancellable = true)
-    private void onSetBlockState(BlockPos pos, IBlockState newState, int flags, CallbackInfoReturnable<Boolean> cir) {
+    // --- Deferred operations when called from entity worker threads ---
+
+    @Inject(method = "setBlockState(Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/block/state/IBlockState;I)Z",
+            at = @At("HEAD"), cancellable = true)
+    private void onSetBlockState(BlockPos pos, IBlockState newState, int flags,
+                                 CallbackInfoReturnable<Boolean> cir) {
         if (EntityTickScheduler.isEntityThread()) {
             BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).setBlockState(p, newState, flags));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.setBlockState(p, newState, flags));
             cir.setReturnValue(true);
         }
     }
@@ -127,12 +123,8 @@ public abstract class WorldMixin implements IMixinWorld {
     @Inject(method = "spawnEntity", at = @At("HEAD"), cancellable = true)
     private void onSpawnEntity(Entity entityIn, CallbackInfoReturnable<Boolean> cir) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> {
-                try {
-                    ((World) (Object) this).spawnEntity(entityIn);
-                } catch (Exception ignored) {
-                }
-            });
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> safeRun(() -> self.spawnEntity(entityIn)));
             cir.setReturnValue(true);
         }
     }
@@ -140,12 +132,8 @@ public abstract class WorldMixin implements IMixinWorld {
     @Inject(method = "removeEntity", at = @At("HEAD"), cancellable = true)
     private void onRemoveEntity(Entity entityIn, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> {
-                try {
-                    ((World) (Object) this).removeEntity(entityIn);
-                } catch (Exception ignored) {
-                }
-            });
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> safeRun(() -> self.removeEntity(entityIn)));
             ci.cancel();
         }
     }
@@ -153,29 +141,31 @@ public abstract class WorldMixin implements IMixinWorld {
     @Inject(method = "removeEntityDangerously", at = @At("HEAD"), cancellable = true)
     private void onRemoveEntityDangerously(Entity entityIn, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> {
-                try {
-                    ((World) (Object) this).removeEntityDangerously(entityIn);
-                } catch (Exception ignored) {
-                }
-            });
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> safeRun(() -> self.removeEntityDangerously(entityIn)));
             ci.cancel();
         }
     }
 
-    @Inject(method = "playSound(Lnet/minecraft/entity/player/EntityPlayer;DDDLnet/minecraft/util/SoundEvent;Lnet/minecraft/util/SoundCategory;FF)V", at = @At("HEAD"), cancellable = true)
-    private void onPlaySound(EntityPlayer player, double x, double y, double z, SoundEvent soundIn, SoundCategory category, float volume, float pitch, CallbackInfo ci) {
+    @Inject(method = "playSound(Lnet/minecraft/entity/player/EntityPlayer;DDDLnet/minecraft/util/SoundEvent;Lnet/minecraft/util/SoundCategory;FF)V",
+            at = @At("HEAD"), cancellable = true)
+    private void onPlaySound(EntityPlayer player, double x, double y, double z,
+                             SoundEvent soundIn, SoundCategory category,
+                             float volume, float pitch, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).playSound(player, x, y, z, soundIn, category, volume, pitch));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.playSound(player, x, y, z, soundIn, category, volume, pitch));
             ci.cancel();
         }
     }
 
     @Inject(method = "notifyNeighborsOfStateChange", at = @At("HEAD"), cancellable = true)
-    private void onNotifyNeighbors(BlockPos pos, Block blockType, boolean updateObservers, CallbackInfo ci) {
+    private void onNotifyNeighbors(BlockPos pos, Block blockType, boolean updateObservers,
+                                   CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
             BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).notifyNeighborsOfStateChange(p, blockType, updateObservers));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.notifyNeighborsOfStateChange(p, blockType, updateObservers));
             ci.cancel();
         }
     }
@@ -184,16 +174,19 @@ public abstract class WorldMixin implements IMixinWorld {
     private void onCheckLight(BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
         if (EntityTickScheduler.isEntityThread()) {
             BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).checkLight(p));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.checkLight(p));
             cir.setReturnValue(true);
         }
     }
 
     @Inject(method = "checkLightFor", at = @At("HEAD"), cancellable = true)
-    private void onCheckLightFor(EnumSkyBlock lightType, BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
+    private void onCheckLightFor(EnumSkyBlock lightType, BlockPos pos,
+                                 CallbackInfoReturnable<Boolean> cir) {
         if (EntityTickScheduler.isEntityThread()) {
             BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).checkLightFor(lightType, p));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.checkLightFor(lightType, p));
             cir.setReturnValue(true);
         }
     }
@@ -202,7 +195,8 @@ public abstract class WorldMixin implements IMixinWorld {
     private void onSetTileEntity(BlockPos pos, TileEntity te, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
             BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).setTileEntity(p, te));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.setTileEntity(p, te));
             ci.cancel();
         }
     }
@@ -211,7 +205,8 @@ public abstract class WorldMixin implements IMixinWorld {
     private void onRemoveTileEntity(BlockPos pos, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
             BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).removeTileEntity(p));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.removeTileEntity(p));
             ci.cancel();
         }
     }
@@ -220,20 +215,16 @@ public abstract class WorldMixin implements IMixinWorld {
     private void onGetChunk(int x, int z, CallbackInfoReturnable<Chunk> cir) {
         if (EntityTickScheduler.isEntityThread()) {
             Chunk cached = EntityTickScheduler.getChunkFromSnapshot(x, z);
-            cir.setReturnValue(Objects.requireNonNullElseGet(cached, () -> new EmptyChunk((World) (Object) this, x, z)));
+            cir.setReturnValue(Objects.requireNonNullElseGet(cached,
+                    () -> new EmptyChunk((World) (Object) this, x, z)));
         }
     }
-
 
     @Inject(method = "onEntityAdded", at = @At("HEAD"), cancellable = true)
     private void onOnEntityAdded(Entity entityIn, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> {
-                try {
-                    ((World) (Object) this).onEntityAdded(entityIn);
-                } catch (Exception ignored) {
-                }
-            });
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> safeRun(() -> self.onEntityAdded(entityIn)));
             ci.cancel();
         }
     }
@@ -241,21 +232,19 @@ public abstract class WorldMixin implements IMixinWorld {
     @Inject(method = "onEntityRemoved", at = @At("HEAD"), cancellable = true)
     private void onOnEntityRemoved(Entity entityIn, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
-            DeferredActionQueue.enqueue(() -> {
-                try {
-                    ((World) (Object) this).onEntityRemoved(entityIn);
-                } catch (Exception ignored) {
-                }
-            });
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> safeRun(() -> self.onEntityRemoved(entityIn)));
             ci.cancel();
         }
     }
 
     @Inject(method = "scheduleBlockUpdate", at = @At("HEAD"), cancellable = true)
-    private void onScheduleBlockUpdate(BlockPos pos, Block blockIn, int delay, int priority, CallbackInfo ci) {
+    private void onScheduleBlockUpdate(BlockPos pos, Block blockIn, int delay, int priority,
+                                       CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
             BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).scheduleBlockUpdate(p, blockIn, delay, priority));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.scheduleBlockUpdate(p, blockIn, delay, priority));
             ci.cancel();
         }
     }
@@ -264,17 +253,33 @@ public abstract class WorldMixin implements IMixinWorld {
     private void onScheduleUpdate(BlockPos pos, Block blockIn, int delay, CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
             BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).scheduleUpdate(p, blockIn, delay));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.scheduleUpdate(p, blockIn, delay));
             ci.cancel();
         }
     }
 
     @Inject(method = "updateBlockTick", at = @At("HEAD"), cancellable = true)
-    private void onUpdateBlockTick(BlockPos pos, Block blockIn, int delay, int priority, CallbackInfo ci) {
+    private void onUpdateBlockTick(BlockPos pos, Block blockIn, int delay, int priority,
+                                   CallbackInfo ci) {
         if (EntityTickScheduler.isEntityThread()) {
             BlockPos p = pos.toImmutable();
-            DeferredActionQueue.enqueue(() -> ((World) (Object) this).updateBlockTick(p, blockIn, delay, priority));
+            World self = (World) (Object) this;
+            DeferredActionQueue.enqueue(() -> self.updateBlockTick(p, blockIn, delay, priority));
             ci.cancel();
+        }
+    }
+
+    /**
+     * Runs an action, logging any exception rather than silently swallowing it.
+     */
+    @Unique
+    private static void safeRun(Runnable action) {
+        try {
+            action.run();
+        } catch (Exception e) {
+            ded.entitythreading.EntityThreadingMod.LOGGER.debug(
+                    "Deferred world action failed: {}", e.getMessage());
         }
     }
 }

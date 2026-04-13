@@ -5,12 +5,15 @@ import net.minecraftforge.fml.relauncher.IFMLLoadingPlugin;
 import javax.annotation.Nullable;
 import java.util.Map;
 
-public class ETLoadingPlugin implements IFMLLoadingPlugin {
+public final class ETLoadingPlugin implements IFMLLoadingPlugin {
+
+    private static final String[] ASM_TRANSFORMERS = {
+            "ded.entitythreading.asm.transformer.WorldTransformer"
+    };
+
     @Override
-    public @Nullable String[] getASMTransformerClass() {
-        return new String[]{
-                "ded.entitythreading.asm.transformer.WorldTransformer",
-        };
+    public String[] getASMTransformerClass() {
+        return ASM_TRANSFORMERS;
     }
 
     @Override
@@ -25,7 +28,7 @@ public class ETLoadingPlugin implements IFMLLoadingPlugin {
 
     @Override
     public void injectData(Map<String, Object> map) {
-
+        // No injection data needed
     }
 
     @Override

@@ -1,0 +1,12 @@
+[{
+	"modid": "entitythreading",
+	"name": "Entity Threading",
+	"version": "2.2.0",
+	"mcversion": "1.12.2",
+	"description": "Parallel entity ticking for Minecraft 1.12.2",
+	"authorList": [""],
+	"credits": "",
+	"url": "",
+	"updateJSON": "",
+	"logoFile": ""
+}]

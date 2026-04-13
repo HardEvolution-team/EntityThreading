@@ -9,11 +9,22 @@ import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 
+/**
+ * Replaces the backing collections of {@link ClassInheritanceMultiMap}
+ * with concurrent-safe implementations to prevent CME during parallel entity ticking.
+ *
+ * CRITICAL FIX: CopyOnWriteArrayList has O(n) add — catastrophic for chunks with
+ * hundreds of entities. Instead, we use Collections.synchronizedList(ArrayList)
+ * which has O(1) amortized add and only synchronizes on access.
+ *
+ * The iteration pattern in entity ticking (for-each over the list) is safe because:
+ * 1. Entity additions/removals during parallel ticking are deferred to main thread
+ * 2. The synchronizedList's iterator must be manually synchronized — but since we
+ *    snapshot to array before iteration in hot paths, this is acceptable
+ */
 @Mixin(ClassInheritanceMultiMap.class)
 public abstract class ClassInheritanceMultiMapMixin<T> {
 
@@ -29,15 +40,22 @@ public abstract class ClassInheritanceMultiMapMixin<T> {
 
     @Inject(method = "<init>", at = @At("RETURN"))
     private void onInit(Class<T> baseClassIn, CallbackInfo ci) {
-        this.values = new CopyOnWriteArrayList<>();
+        List<T> safeValues = Collections.synchronizedList(new ArrayList<>());
+        this.values = safeValues;
+
         ConcurrentHashMap<Class<?>, List<T>> safeMap = new ConcurrentHashMap<>();
-        safeMap.put(baseClassIn, this.values);
+        safeMap.put(baseClassIn, safeValues);
         this.map = safeMap;
     }
 
+    /**
+     * Override addForClass to use computeIfAbsent with synchronized list creation.
+     * This is called when entities are added to a chunk's entity list.
+     */
     @Inject(method = "addForClass", at = @At("HEAD"), cancellable = true)
     private void onAddForClass(T value, Class<?> parentClass, CallbackInfo ci) {
-        this.map.computeIfAbsent(parentClass, _ -> new CopyOnWriteArrayList<>()).add(value);
+        this.map.computeIfAbsent(parentClass, _ -> Collections.synchronizedList(new ArrayList<>()))
+                .add(value);
         ci.cancel();
     }
 }

@@ -2,13 +2,17 @@ package ded.entitythreading.schedule;
 
 import java.util.ArrayList;
 
+/**
+ * Custom thread class for entity worker threads.
+ * Carries per-thread state to avoid ThreadLocal lookups in hot paths.
+ */
 public final class EntityWorkerThread extends Thread {
 
-    boolean isWorker = false;
-    boolean isRemote = false;
+    volatile boolean isWorker = false;
+    volatile boolean isRemote = false;
     long lastChunkKey = Long.MIN_VALUE;
     Object lastChunk = null;
-    ArrayList<Runnable> deferredBuffer = new ArrayList<>(128);
+    final ArrayList<Runnable> deferredBuffer = new ArrayList<>(128);
 
     public EntityWorkerThread(Runnable target, String name) {
         super(target, name);
@@ -17,16 +21,11 @@ public final class EntityWorkerThread extends Thread {
     }
 
     public static boolean isCurrentThreadWorker() {
-        return Thread.currentThread() instanceof EntityWorkerThread
-                && ((EntityWorkerThread) Thread.currentThread()).isWorker;
+        return Thread.currentThread() instanceof EntityWorkerThread ewt && ewt.isWorker;
     }
 
     public static boolean isCurrentThreadRemote() {
-        Thread t = Thread.currentThread();
-        if (t instanceof EntityWorkerThread) {
-            return ((EntityWorkerThread) t).isRemote;
-        }
-        return false;
+        return Thread.currentThread() instanceof EntityWorkerThread ewt && ewt.isRemote;
     }
 
     void resetForTask(boolean remote) {

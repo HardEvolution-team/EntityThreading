@@ -4,7 +4,7 @@ import ded.entitythreading.Reference;
 import net.minecraftforge.common.config.Config;
 
 @Config(modid = Reference.MOD_ID, name = Reference.MOD_NAME)
-public class EntityThreadingConfig {
+public final class EntityThreadingConfig {
 
     @Config.Comment("Master switch to enable/disable parallel entity ticking.")
     public static boolean enabled = true;
@@ -22,7 +22,7 @@ public class EntityThreadingConfig {
     public static int manualThreadCount = 3;
 
     @Config.Comment("Entity classes to exclude from parallel ticking. Use full class names.")
-    public static String[] blacklistedEntities = new String[]{
+    public static String[] blacklistedEntities = {
             "net.minecraft.entity.item.EntityItem",
             "net.minecraft.entity.item.EntityXPOrb"
     };
@@ -41,27 +41,61 @@ public class EntityThreadingConfig {
     @Config.RangeInt(min = 10, max = 500)
     public static int minBatchSize = 50;
 
-    @Config.Comment("Enable entity activation range (skip ticking far entities). Huge performance boost.")
+    // ─── Entity Activation Range ────────────────────────────────────────
+
+    @Config.Comment("Enable distance-based tick throttling (huge performance boost).")
     public static boolean entityActivationRange = true;
 
-    @Config.Comment("Activation range for hostile mobs (blocks).")
+    // Monsters
+    @Config.Comment("Monsters: full tick rate within this range (blocks).")
     @Config.RangeInt(min = 8, max = 256)
-    public static int activationRangeMonsters = 32;
+    public static int activationRangeMonstersTier1 = 32;
 
-    @Config.Comment("Activation range for passive animals (blocks).")
+    @Config.Comment("Monsters: tick every 2nd tick within this range (blocks).")
+    @Config.RangeInt(min = 16, max = 256)
+    public static int activationRangeMonstersTier2 = 64;
+
+    @Config.Comment("Monsters: tick every 4th tick within this range (blocks). Beyond = every 8th tick.")
+    @Config.RangeInt(min = 32, max = 512)
+    public static int activationRangeMonstersTier3 = 128;
+
+    // Animals
+    @Config.Comment("Animals: full tick rate within this range (blocks).")
     @Config.RangeInt(min = 8, max = 256)
-    public static int activationRangeAnimals = 16;
+    public static int activationRangeAnimalsTier1 = 32;
 
-    @Config.Comment("Activation range for misc entities (blocks).")
+    @Config.Comment("Animals: tick every 2nd tick within this range (blocks).")
+    @Config.RangeInt(min = 16, max = 256)
+    public static int activationRangeAnimalsTier2 = 64;
+
+    @Config.Comment("Animals: tick every 4th tick within this range (blocks). Beyond = every 8th tick.")
+    @Config.RangeInt(min = 32, max = 512)
+    public static int activationRangeAnimalsTier3 = 128;
+
+    // Misc
+    @Config.Comment("Misc entities: full tick rate within this range (blocks).")
     @Config.RangeInt(min = 8, max = 256)
-    public static int activationRangeMisc = 16;
+    public static int activationRangeMiscTier1 = 32;
 
+    @Config.Comment("Misc entities: tick every 2nd tick within this range (blocks).")
+    @Config.RangeInt(min = 16, max = 256)
+    public static int activationRangeMiscTier2 = 64;
+
+    @Config.Comment("Misc entities: tick every 4th tick within this range (blocks). Beyond = every 8th tick.")
+    @Config.RangeInt(min = 32, max = 512)
+    public static int activationRangeMiscTier3 = 128;
+
+    /**
+     * Returns the effective thread count based on the configured mode.
+     */
     public static int getEffectiveThreadCount() {
         int cores = Runtime.getRuntime().availableProcessors();
         return switch (threadMode.toLowerCase()) {
             case "max" -> Math.max(2, cores - 1);
-            case "manual" -> Math.clamp(cores, 1, manualThreadCount);
+            case "manual" -> Math.clamp(manualThreadCount, 1, Math.max(1, cores));
             default -> Math.clamp(cores / 2, 2, 4);
         };
     }
+
+    private EntityThreadingConfig() {}
 }
