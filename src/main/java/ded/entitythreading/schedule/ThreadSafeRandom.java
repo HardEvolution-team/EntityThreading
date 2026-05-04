@@ -5,97 +5,81 @@ import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * A {@link Random} subclass that delegates to {@link ThreadLocalRandom}
- * when called from entity worker threads, avoiding contention on the
+ * when called from a virtual entity-tick thread, avoiding contention on the
  * shared {@code World.rand} instance.
  * <p>
- * Thread safety notes:
- * - {@link Random#next(int)} internally uses AtomicLong CAS — thread-safe but contended
- * - {@link Random#nextGaussian()} uses unsynchronized instance fields — NOT thread-safe
- * - We synchronize nextGaussian for the main-thread path to prevent corruption
- *   when the main thread participates in work-stealing
+ * Thread-safety notes:
+ * <ul>
+ *   <li>{@link Random#next(int)} uses {@code AtomicLong} CAS internally — thread-safe but contended.</li>
+ *   <li>{@link Random#nextGaussian()} uses unsynchronized instance fields — NOT thread-safe.</li>
+ *   <li>We synchronize {@code nextGaussian} for the main-thread path to prevent corruption
+ *       when the main thread participates as a work-stealer.</li>
+ * </ul>
+ * <p>
+ * Detection of "entity thread" is done via {@link EntityTickScheduler#TICK_CONTEXT}
+ * ({@link ScopedValue}) instead of the old {@code instanceof EntityWorkerThread} check,
+ * so this class works correctly with Java 25 virtual threads.
  */
 public final class ThreadSafeRandom extends Random {
 
     @java.io.Serial
     private static final long serialVersionUID = 1L;
 
-    public ThreadSafeRandom() {
-        super();
-    }
+    public ThreadSafeRandom() { super(); }
+    public ThreadSafeRandom(long seed) { super(seed); }
 
-    public ThreadSafeRandom(long seed) {
-        super(seed);
+    /** Returns {@code true} when called from a virtual entity-tick thread. */
+    private static boolean isEntityThread() {
+        return EntityTickScheduler.TICK_CONTEXT.isBound();
     }
 
     @Override
     protected int next(int bits) {
-        if (Thread.currentThread() instanceof EntityWorkerThread) {
+        if (isEntityThread()) {
             return ThreadLocalRandom.current().nextInt() >>> (32 - bits);
         }
-        // Random.next() uses AtomicLong internally — safe for single-thread access
         return super.next(bits);
     }
 
     /**
-     * nextGaussian() in java.util.Random uses two non-volatile instance fields
-     * (haveNextNextGaussian, nextNextGaussian) without synchronization.
-     * Since the main thread may call this while workers also call next(),
-     * we synchronize the main-thread path.
+     * {@code nextGaussian()} in {@link java.util.Random} uses two non-volatile instance fields
+     * without synchronization. We synchronize the main-thread path to prevent data corruption.
      */
     @Override
     public synchronized double nextGaussian() {
-        if (Thread.currentThread() instanceof EntityWorkerThread) {
+        if (isEntityThread()) {
             return ThreadLocalRandom.current().nextGaussian();
         }
         return super.nextGaussian();
     }
 
-    // Override commonly used methods to avoid virtual dispatch through next()
     @Override
     public int nextInt() {
-        if (Thread.currentThread() instanceof EntityWorkerThread) {
-            return ThreadLocalRandom.current().nextInt();
-        }
-        return super.nextInt();
+        return isEntityThread() ? ThreadLocalRandom.current().nextInt() : super.nextInt();
     }
 
     @Override
     public int nextInt(int bound) {
-        if (Thread.currentThread() instanceof EntityWorkerThread) {
-            return ThreadLocalRandom.current().nextInt(bound);
-        }
-        return super.nextInt(bound);
+        return isEntityThread() ? ThreadLocalRandom.current().nextInt(bound) : super.nextInt(bound);
     }
 
     @Override
     public float nextFloat() {
-        if (Thread.currentThread() instanceof EntityWorkerThread) {
-            return ThreadLocalRandom.current().nextFloat();
-        }
-        return super.nextFloat();
+        return isEntityThread() ? ThreadLocalRandom.current().nextFloat() : super.nextFloat();
     }
 
     @Override
     public double nextDouble() {
-        if (Thread.currentThread() instanceof EntityWorkerThread) {
-            return ThreadLocalRandom.current().nextDouble();
-        }
-        return super.nextDouble();
+        return isEntityThread() ? ThreadLocalRandom.current().nextDouble() : super.nextDouble();
     }
 
     @Override
     public boolean nextBoolean() {
-        if (Thread.currentThread() instanceof EntityWorkerThread) {
-            return ThreadLocalRandom.current().nextBoolean();
-        }
-        return super.nextBoolean();
+        return isEntityThread() ? ThreadLocalRandom.current().nextBoolean() : super.nextBoolean();
     }
 
     @Override
     public long nextLong() {
-        if (Thread.currentThread() instanceof EntityWorkerThread) {
-            return ThreadLocalRandom.current().nextLong();
-        }
-        return super.nextLong();
+        return isEntityThread() ? ThreadLocalRandom.current().nextLong() : super.nextLong();
     }
 }

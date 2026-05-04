@@ -20,7 +20,7 @@ public final class EntityThreadingMod {
         if (Reference.MOD_ID.equals(event.getModID())) {
             ConfigManager.sync(Reference.MOD_ID, Config.Type.INSTANCE);
             EntityTickScheduler.reinitialize();
-            LOGGER.info("Configuration reloaded, thread pool reinitialized.");
+            LOGGER.info("Configuration reloaded (virtual-thread mode active, no pool to reinitialize).");
         }
     }
 }

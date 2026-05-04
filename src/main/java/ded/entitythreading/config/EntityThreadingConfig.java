@@ -10,14 +10,15 @@ public final class EntityThreadingConfig {
     public static boolean enabled = true;
 
     @Config.Comment({
-            "Thread count mode:",
+            "[IGNORED with virtual threads]",
+            "Thread count mode (kept for config compatibility, has no effect in virtual-thread mode):",
             "  auto   = CPU cores / 2 (minimum 2, maximum 4)",
             "  manual = Use the exact value from 'manualThreadCount'",
             "  max    = Use all available CPU cores minus 1"
     })
     public static String threadMode = "auto";
 
-    @Config.Comment("Number of worker threads when threadMode = manual.")
+    @Config.Comment("[IGNORED with virtual threads] Number of worker threads when threadMode = manual.")
     @Config.RangeInt(min = 1, max = 16)
     public static int manualThreadCount = 3;
 
@@ -37,7 +38,15 @@ public final class EntityThreadingConfig {
     @Config.RangeInt(min = 10, max = 1000)
     public static int minEntitiesForThreading = 100;
 
-    @Config.Comment("Minimum batch size per worker thread.")
+    @Config.Comment({
+        "Number of entities to process per virtual thread.",
+        "Higher values reduce thread creation overhead but decrease parallelism.",
+        "Default: 10"
+    })
+    @Config.RangeInt(min = 1, max = 1000)
+    public static int entitiesPerVirtualThread = 10;
+
+    @Config.Comment("[IGNORED] Minimum batch size per worker thread.")
     @Config.RangeInt(min = 10, max = 500)
     public static int minBatchSize = 50;
 
@@ -86,14 +95,18 @@ public final class EntityThreadingConfig {
     public static int activationRangeMiscTier3 = 128;
 
     /**
-     * Returns the effective thread count based on the configured mode.
+     * @deprecated No longer used. Entity ticking now runs on Java 25 virtual threads
+     *             ({@link java.util.concurrent.Executors#newVirtualThreadPerTaskExecutor()}).
+     *             The JVM's ForkJoinPool manages carrier threads automatically.
+     *             This method is retained only for API compatibility.
      */
+    @Deprecated(since = "2.2.0")
     public static int getEffectiveThreadCount() {
         int cores = Runtime.getRuntime().availableProcessors();
         return switch (threadMode.toLowerCase()) {
-            case "max" -> Math.max(2, cores - 1);
+            case "max"    -> Math.max(2, cores - 1);
             case "manual" -> Math.clamp(manualThreadCount, 1, Math.max(1, cores));
-            default -> Math.clamp(cores / 2, 2, 4);
+            default       -> Math.clamp(cores / 2, 2, 4);
         };
     }
 

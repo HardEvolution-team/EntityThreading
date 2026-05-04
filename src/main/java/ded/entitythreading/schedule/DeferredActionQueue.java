@@ -6,39 +6,45 @@ import java.util.ArrayList;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * Collects actions deferred from worker threads and replays them on the main thread.
+ * Collects actions deferred from virtual entity-tick threads and replays them on the main thread.
  * <p>
- * Worker threads accumulate actions in thread-local buffers (via {@link EntityWorkerThread})
- * which are bulk-submitted when the worker finishes its batch. This minimizes contention
- * on the global queues.
+ * <b>Old model:</b> Worker threads accumulated actions in fields on {@link EntityWorkerThread}.<br>
+ * <b>New model:</b> Each virtual entity-tick thread has an {@link EntityTickContext} bound via
+ * {@link EntityTickScheduler#TICK_CONTEXT} (a {@link ScopedValue}).  The context's
+ * {@code deferredBuffer} is flushed to {@link #WORKER_BUFFERS_SERVER} / {@link #WORKER_BUFFERS_CLIENT}
+ * when the virtual thread's task completes ({@link EntityTickContext#flush()}).
  * <p>
- * All queues are separated by side (client/server) to prevent cross-contamination
- * on integrated servers.
+ * All queues are separated by side (client / server) to prevent cross-contamination on
+ * integrated servers.
  */
 public final class DeferredActionQueue {
 
     private static final ConcurrentLinkedQueue<Runnable> GLOBAL_SERVER = new ConcurrentLinkedQueue<>();
     private static final ConcurrentLinkedQueue<Runnable> GLOBAL_CLIENT = new ConcurrentLinkedQueue<>();
 
-    // Worker buffers are now separated by side
     private static final ConcurrentLinkedQueue<ArrayList<Runnable>> WORKER_BUFFERS_SERVER = new ConcurrentLinkedQueue<>();
     private static final ConcurrentLinkedQueue<ArrayList<Runnable>> WORKER_BUFFERS_CLIENT = new ConcurrentLinkedQueue<>();
 
     private DeferredActionQueue() {}
 
+    /**
+     * Enqueues an action to be replayed on the main thread.
+     * <p>
+     * If called from a virtual entity-tick thread ({@code TICK_CONTEXT} is bound), the action
+     * is added to the thread-local deferred buffer to minimize contention on the global queue.
+     * Otherwise the action is submitted directly to the global queue.
+     */
     public static void enqueue(Runnable action) {
-        Thread t = Thread.currentThread();
-        if (t instanceof EntityWorkerThread worker) {
-            worker.deferredBuffer.add(action);
+        if (EntityTickScheduler.TICK_CONTEXT.isBound()) {
+            EntityTickScheduler.TICK_CONTEXT.get().deferredBuffer.add(action);
         } else {
             enqueueGlobal(EntityTickScheduler.isCurrentThreadRemote(), action);
         }
     }
 
     public static void enqueue(boolean isRemote, Runnable action) {
-        Thread t = Thread.currentThread();
-        if (t instanceof EntityWorkerThread worker) {
-            worker.deferredBuffer.add(action);
+        if (EntityTickScheduler.TICK_CONTEXT.isBound()) {
+            EntityTickScheduler.TICK_CONTEXT.get().deferredBuffer.add(action);
         } else {
             enqueueGlobal(isRemote, action);
         }
@@ -49,8 +55,8 @@ public final class DeferredActionQueue {
     }
 
     /**
-     * Called by worker threads when they finish a batch.
-     * The isRemote flag determines which side's queue receives the buffer.
+     * Called by {@link EntityTickContext#flush()} at the end of each virtual-thread task.
+     * The {@code isRemote} flag is taken from the context itself.
      */
     static void submitWorkerBuffer(ArrayList<Runnable> buffer, boolean isRemote) {
         if (!buffer.isEmpty()) {
@@ -67,7 +73,7 @@ public final class DeferredActionQueue {
     public static int replayAll(boolean isRemote) {
         int count = 0;
 
-        // Drain worker buffers for the correct side
+        // Drain per-virtual-thread buffers for the correct side
         ConcurrentLinkedQueue<ArrayList<Runnable>> workerQueue =
                 isRemote ? WORKER_BUFFERS_CLIENT : WORKER_BUFFERS_SERVER;
 

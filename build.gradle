@@ -250,5 +250,122 @@ tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 
+tasks.register('stripComments') {
+    group = 'cleanup'
+    description = 'Removes all comments (// single-line and /* */ multi-line) from Java source files'
+
+    doLast {
+        fileTree(dir: 'src', includes: ['**/*.java']).each { File file ->
+            String content = file.text
+            StringBuilder result = new StringBuilder()
+            int i = 0
+            int len = content.length()
+
+            while (i < len) {
+                // Handle string literals (double quotes)
+                if (content[i] == '"') {
+                    result.append(content[i])
+                    i++
+                    while (i < len && content[i] != '"') {
+                        if (content[i] == '\\' && i + 1 < len) {
+                            result.append(content[i])
+                            i++
+                            result.append(content[i])
+                            i++
+                        } else {
+                            result.append(content[i])
+                            i++
+                        }
+                    }
+                    if (i < len) {
+                        result.append(content[i]) // closing "
+                        i++
+                    }
+                }
+                // Handle char literals (single quotes)
+                else if (content[i] == '\'') {
+                    result.append(content[i])
+                    i++
+                    while (i < len && content[i] != '\'') {
+                        if (content[i] == '\\' && i + 1 < len) {
+                            result.append(content[i])
+                            i++
+                            result.append(content[i])
+                            i++
+                        } else {
+                            result.append(content[i])
+                            i++
+                        }
+                    }
+                    if (i < len) {
+                        result.append(content[i]) // closing '
+                        i++
+                    }
+                }
+                // Handle single-line comment //
+                else if (i + 1 < len && content[i] == '/' && content[i + 1] == '/') {
+                    // Skip until end of line
+                    while (i < len && content[i] != '\n') {
+                        i++
+                    }
+                    // Remove trailing whitespace on this line that was before the comment
+                    String current = result.toString()
+                    int lastNewline = current.lastIndexOf('\n')
+                    String lastLine = current.substring(lastNewline + 1)
+                    if (lastLine.trim().isEmpty()) {
+                        // The entire line was just a comment — remove the trailing whitespace too
+                        result = new StringBuilder(current.substring(0, lastNewline + 1))
+                        // Skip the newline as well so we don't leave a blank line
+                        if (i < len && content[i] == '\n') {
+                            i++
+                        }
+                    }
+                }
+                // Handle multi-line comment /* ... */
+                else if (i + 1 < len && content[i] == '/' && content[i + 1] == '*') {
+                    // Remember position before comment to handle blank lines
+                    String current = result.toString()
+                    int lastNewline = current.lastIndexOf('\n')
+                    String lastLine = current.substring(lastNewline + 1)
+                    boolean lineWasEmpty = lastLine.trim().isEmpty()
+
+                    // Skip the entire block comment
+                    i += 2
+                    while (i + 1 < len && !(content[i] == '*' && content[i + 1] == '/')) {
+                        i++
+                    }
+                    if (i + 1 < len) {
+                        i += 2 // skip */
+                    }
+
+                    // If the comment was on its own line(s), clean up
+                    if (lineWasEmpty) {
+                        result = new StringBuilder(current.substring(0, lastNewline + 1))
+                        // Skip whitespace and newline after closing */
+                        while (i < len && content[i] != '\n' && Character.isWhitespace((char) content[i])) {
+                            i++
+                        }
+                        if (i < len && content[i] == '\n') {
+                            i++
+                        }
+                    }
+                }
+                // Regular character
+                else {
+                    result.append(content[i])
+                    i++
+                }
+            }
+
+            // Remove excessive blank lines (more than 2 consecutive)
+            String cleaned = result.toString().replaceAll(/\n{3,}/, '\n\n')
+
+            file.text = cleaned
+            logger.lifecycle("Stripped comments from: ${file.path}")
+        }
+    }
+}
+
+
 apply from: 'gradle/scripts/publishing.gradle'
 apply from: 'gradle/scripts/extra.gradle'

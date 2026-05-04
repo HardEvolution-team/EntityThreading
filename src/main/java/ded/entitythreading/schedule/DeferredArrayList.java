@@ -32,7 +32,7 @@ public class DeferredArrayList<E> extends ArrayList<E> {
     }
 
     private static boolean isWorker() {
-        return EntityWorkerThread.isCurrentThreadWorker();
+        return EntityTickScheduler.isEntityThread();
     }
 
     private void markDirty() {
